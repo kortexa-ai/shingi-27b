@@ -72,9 +72,13 @@ int main(int argc, char **argv) {
     }
 #ifndef __APPLE__
     // Apple Silicon has exactly one Metal GPU and no CUDA device selection.
-    const char *gpu = std::getenv("CUDA_VISIBLE_DEVICES");
-    if (!gpu || !std::regex_match(gpu, std::regex("GPU-[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"))) {
-        std::cerr << "Set CUDA_VISIBLE_DEVICES to exactly one full GPU UUID\n";
+    const char *vendor = std::getenv("SHINGI_GPU_VENDOR");
+    const bool rocm = vendor && std::string(vendor) == "rocm";
+    const char *gpu = std::getenv(rocm ? "ROCR_VISIBLE_DEVICES" : "CUDA_VISIBLE_DEVICES");
+    if (!gpu || !(rocm ? std::regex_match(gpu, std::regex("[0-9]+"))
+                       : std::regex_match(gpu, std::regex("GPU-[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")))) {
+        std::cerr << (rocm ? "Set ROCR_VISIBLE_DEVICES to exactly one GPU index"
+                           : "Set CUDA_VISIBLE_DEVICES to exactly one full GPU UUID") << "\n";
         return 2;
     }
 #endif
