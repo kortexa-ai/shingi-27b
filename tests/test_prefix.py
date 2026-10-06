@@ -40,7 +40,7 @@ class PromptReadout:
         self.calls.append(("prefix", prefix, suffixes, images))
         results = [{"logits": logits_for(prefix + text, labels), "input_tokens": len(prefix + text),
                     "suffix_tokens": len(text), "prefill_ms": 0.5, "log_normalizer": 10.0} for text, labels in suffixes]
-        response = {"results": results, "prefix_tokens": len(prefix), "prefix_ms": 3.0, "snapshot_ms": 1.0}
+        response = {"results": results, "prefix_tokens": len(prefix), "prefix_ms": 4.0}
         if images:
             response |= {"images": len(images), "image_tokens": 1024 * len(images)}
         return response

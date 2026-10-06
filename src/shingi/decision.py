@@ -118,8 +118,8 @@ class DecisionEngine:
                 raise RuntimeError("the readout returned the wrong number of prefix results")
             shared = {key: response[key] for key in ("images", "image_tokens") if key in response}
             results = [{**result, **shared} for result in results]
-            # The shared prefix is evaluated (or restored from the readout's cache) once per call.
-            results[0]["shared_prefill_ms"] = response.get("prefix_ms", 0) + response.get("snapshot_ms", 0)
+            # The shared prefix is evaluated (and its state saved) at most once per call.
+            results[0]["shared_prefill_ms"] = response.get("prefix_ms", 0)
             return results
         return [self.backend.infer(prompt_for(state, i, o, len(images)), l, list(images)) if images
                 else self.backend.infer(prompt_for(state, i, o), l)

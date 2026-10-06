@@ -112,14 +112,15 @@ static json candidates(llama_context *ctx, const std::vector<llama_token> &ids, 
     return {{"logits", logits}, {"candidate_ids", ids}, {"log_normalizer", peak + std::log(sum)}};
 }
 
-// Decode text tokens on sequence 0 from position n_past, in batches like mtmd's text chunks,
-// with logits for the last token only.
-static void decode_text(llama_context *ctx, const std::vector<llama_token> &tokens, llama_pos n_past, int n_batch) {
+// Decode text tokens on sequence 0 from position n_past in batches of n_batch, as mtmd decodes a
+// text chunk: logits only for the last token, and only when logits_last is set.
+static void decode_text(llama_context *ctx, const llama_token *tokens, size_t n, llama_pos n_past, int n_batch,
+                        bool logits_last) {
     llama_batch batch = llama_batch_init(n_batch, 0, 1);
     try {
-        for (size_t i = 0; i < tokens.size();) {
+        for (size_t i = 0; i < n;) {
             batch.n_tokens = 0;
-            for (; i < tokens.size() && batch.n_tokens < n_batch; ++i) {
+            for (; i < n && batch.n_tokens < n_batch; ++i) {
                 int j = batch.n_tokens++;
                 batch.token[j] = tokens[i];
                 batch.pos[j] = n_past++;
@@ -127,7 +128,7 @@ static void decode_text(llama_context *ctx, const std::vector<llama_token> &toke
                 batch.seq_id[j][0] = 0;
                 batch.logits[j] = false;
             }
-            if (i == tokens.size()) batch.logits[batch.n_tokens - 1] = true;
+            if (i == n && logits_last) batch.logits[batch.n_tokens - 1] = true;
             if (llama_decode(ctx, batch) != 0) throw std::runtime_error("llama_decode failed");
         }
     } catch (...) {
@@ -135,6 +136,15 @@ static void decode_text(llama_context *ctx, const std::vector<llama_token> &toke
         throw;
     }
     llama_batch_free(batch);
+}
+
+// Decode text-only prompt tokens as the single-prompt path does: llama_batch_get_one per n_batch tokens.
+static void decode_plain(llama_context *ctx, const llama_token *tokens, size_t n, int n_batch) {
+    for (size_t pos = 0; pos < n; pos += n_batch) {
+        auto count = std::min<size_t>(n_batch, n - pos);
+        if (llama_decode(ctx, llama_batch_get_one(const_cast<llama_token *>(tokens) + pos, count)) != 0)
+            throw std::runtime_error("llama_decode failed");
+    }
 }
 
 // Decode and tokenize a prompt with images through mtmd, as the single-prompt path does.
@@ -174,15 +184,20 @@ static size_t image_token_count(const mtmd::input_chunks &chunks) {
     return n;
 }
 
+// The saved state of a prefix. The state is taken at the last n_batch boundary of the prompt's
+// final text run (all text without images; the text after the last image with them), so every
+// suffix continues with exactly the batches the full prompt would use: rest + suffix tokens.
 struct Snapshot {
     std::string key;
-    std::vector<uint8_t> state;
+    std::vector<uint8_t> state;  // Empty when the boundary is the start of a text-only prompt.
     size_t prefix_tokens = 0, images = 0, image_tokens = 0;
     llama_pos n_past = 0;
-    // Tokens of the prefix text after the last image (the whole prefix without images): the
-    // part whose tokenization must not merge across the prefix boundary.
+    std::vector<llama_token> rest;
+    // The prefix text after the last image (the whole prefix without images) and its tokens:
+    // the part whose tokenization must not merge across the prefix boundary.
     std::string tail;
     std::vector<llama_token> tail_tokens;
+    bool split_ok = true;
 };
 
 struct Runtime {
@@ -203,7 +218,7 @@ struct Runtime {
 
     void restore(const Snapshot &s) {
         llama_memory_clear(llama_get_memory(ctx), true);
-        if (llama_state_seq_set_data(ctx, s.state.data(), s.state.size(), 0) != s.state.size())
+        if (!s.state.empty() && llama_state_seq_set_data(ctx, s.state.data(), s.state.size(), 0) != s.state.size())
             throw std::runtime_error("restoring the prefix sequence state failed");
     }
 
@@ -214,11 +229,7 @@ struct Runtime {
             auto tokens = tokenize(vocab, prompt, true);
             if (tokens.empty() || tokens.size() > llama_n_ctx(ctx))
                 throw std::invalid_argument("prompt exceeds context or is empty; never truncated");
-            for (size_t pos = 0; pos < tokens.size(); pos += n_batch) {
-                auto count = std::min<size_t>(n_batch, tokens.size() - pos);
-                if (llama_decode(ctx, llama_batch_get_one(tokens.data() + pos, count)) != 0)
-                    throw std::runtime_error("llama_decode failed");
-            }
+            decode_plain(ctx, tokens.data(), tokens.size(), n_batch);
             return tokens.size();
         }
         mtmd::input_chunks chunks;
@@ -229,6 +240,57 @@ struct Runtime {
         if (mtmd_helper_eval_chunks(vision, ctx, chunks.ptr.get(), 0, 0, n_batch, true, &n_past) != 0)
             throw std::runtime_error("multimodal evaluation failed");
         return n;
+    }
+
+    // Evaluate the prefix up to its snapshot boundary and save the sequence state.
+    void evaluate_prefix(const std::string &prefix, const json &images, Snapshot &made, double &preprocess_ms,
+                         double &snapshot_ms) {
+        llama_memory_clear(llama_get_memory(ctx), true);
+        made.images = images.size();
+        if (images.empty()) {
+            auto tokens = tokenize_text(vocab, prefix, true, true);
+            if (tokens.empty() || tokens.size() > llama_n_ctx(ctx))
+                throw std::invalid_argument("prefix exceeds context or is empty; never truncated");
+            size_t boundary = tokens.size() / n_batch * n_batch;
+            decode_plain(ctx, tokens.data(), boundary, n_batch);
+            made.prefix_tokens = tokens.size();
+            made.n_past = static_cast<llama_pos>(boundary);
+            made.rest.assign(tokens.begin() + boundary, tokens.end());
+            made.tail = prefix;
+            made.tail_tokens = std::move(tokens);
+        } else {
+            auto start = std::chrono::steady_clock::now();
+            mtmd::input_chunks chunks;
+            media_chunks(vision, prefix, images, marker, chunks);
+            made.image_tokens = image_token_count(chunks);
+            made.prefix_tokens = mtmd_helper_get_n_tokens(chunks.ptr.get());
+            if (made.prefix_tokens > llama_n_ctx(ctx))
+                throw std::invalid_argument("prefix with images exceeds context; never truncated");
+            made.tail = prefix.substr(prefix.rfind(marker) + marker.size());
+            made.tail_tokens = tokenize_text(vocab, made.tail, false, true);
+            size_t n_last = 0;
+            const llama_token *last = mtmd_input_chunk_get_tokens_text(chunks[chunks.size() - 1], &n_last);
+            // mtmd tokenizes the text after the last image on its own; the last chunk must end with it.
+            made.split_ok = n_last >= made.tail_tokens.size() &&
+                std::equal(made.tail_tokens.begin(), made.tail_tokens.end(), last + n_last - made.tail_tokens.size());
+            preprocess_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            llama_pos n_past = 0;
+            for (size_t i = 0; i + 1 < chunks.size(); ++i)
+                if (mtmd_helper_eval_chunk_single(vision, ctx, chunks[i], n_past, 0, n_batch, false, &n_past) != 0)
+                    throw std::runtime_error("multimodal evaluation failed");
+            size_t boundary = n_last / n_batch * n_batch;
+            decode_text(ctx, last, boundary, n_past, n_batch, false);
+            made.n_past = n_past + static_cast<llama_pos>(boundary);
+            made.rest.assign(last + boundary, last + n_last);
+        }
+        if (made.n_past > 0) {
+            auto start = std::chrono::steady_clock::now();
+            size_t size = llama_state_seq_get_size(ctx, 0);
+            made.state.resize(size);
+            if (size == 0 || llama_state_seq_get_data(ctx, made.state.data(), size, 0) != size)
+                throw std::runtime_error("saving the prefix sequence state failed");
+            snapshot_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        }
     }
 
     json prefix_request(const json &request) {
@@ -265,10 +327,9 @@ struct Runtime {
             if (suffix_tokens.back().empty()) throw std::invalid_argument("a suffix must not be empty");
         }
 
-        auto start = std::chrono::steady_clock::now();
         Snapshot *snapshot = nullptr;
-        bool cache_hit = false, fresh = false;
-        double prefix_ms = 0, snapshot_ms = 0, preprocess_ms = 0;
+        bool cache_hit = false;
+        double prefix_ms = 0, preprocess_ms = 0, snapshot_ms = 0;
         Snapshot made;
         if (use_cache)
             for (auto it = cache.begin(); it != cache.end(); ++it)
@@ -278,49 +339,14 @@ struct Runtime {
                     cache_hit = true;
                     break;
                 }
+        bool fresh = false;  // The memory holds exactly the snapshot state.
         if (!snapshot) {
+            auto start = std::chrono::steady_clock::now();
             made.key = key;
-            made.images = images.size();
-            llama_memory_clear(llama_get_memory(ctx), true);
-            if (images.empty()) {
-                auto tokens = tokenize_text(vocab, prefix, true, true);
-                if (tokens.empty() || tokens.size() > llama_n_ctx(ctx))
-                    throw std::invalid_argument("prefix exceeds context or is empty; never truncated");
-                decode_text(ctx, tokens, 0, n_batch);
-                made.prefix_tokens = tokens.size();
-                made.n_past = static_cast<llama_pos>(tokens.size());
-                made.tail = prefix;
-                made.tail_tokens = std::move(tokens);
-            } else {
-                mtmd::input_chunks chunks;
-                media_chunks(vision, prefix, images, marker, chunks);
-                made.image_tokens = image_token_count(chunks);
-                made.prefix_tokens = mtmd_helper_get_n_tokens(chunks.ptr.get());
-                if (made.prefix_tokens > llama_n_ctx(ctx))
-                    throw std::invalid_argument("prefix with images exceeds context; never truncated");
-                made.tail = prefix.substr(prefix.rfind(marker) + marker.size());
-                made.tail_tokens = tokenize_text(vocab, made.tail, false, true);
-                // mtmd tokenizes the text after the last image on its own; the last chunk must end with it.
-                size_t n_last = 0;
-                const llama_token *last = mtmd_input_chunk_get_tokens_text(chunks[chunks.size() - 1], &n_last);
-                if (n_last < made.tail_tokens.size() ||
-                    !std::equal(made.tail_tokens.begin(), made.tail_tokens.end(), last + n_last - made.tail_tokens.size()))
-                    made.tail_tokens.clear();  // Unexpected layout: every suffix falls back below.
-                preprocess_ms = since(start);
-                llama_pos n_past = 0;
-                if (mtmd_helper_eval_chunks(vision, ctx, chunks.ptr.get(), 0, 0, n_batch, true, &n_past) != 0)
-                    throw std::runtime_error("multimodal evaluation failed");
-                made.n_past = n_past;
-            }
+            evaluate_prefix(prefix, images, made, preprocess_ms, snapshot_ms);
             prefix_ms = since(start);
-            auto snap_start = std::chrono::steady_clock::now();
-            size_t size = llama_state_seq_get_size(ctx, 0);
-            made.state.resize(size);
-            if (size == 0 || llama_state_seq_get_data(ctx, made.state.data(), size, 0) != size)
-                throw std::runtime_error("saving the prefix sequence state failed");
-            snapshot_ms = since(snap_start);
             snapshot = &made;
-            fresh = true;  // The memory still holds exactly the prefix.
+            fresh = true;
         }
 
         json results = json::array();
@@ -331,7 +357,7 @@ struct Runtime {
             if (input_tokens > llama_n_ctx(ctx))
                 throw std::invalid_argument("prompt exceeds context; never truncated");
             // The prefix may be reused only where the full prompt's tokenization splits too.
-            bool split = !snapshot->tail_tokens.empty();
+            bool split = snapshot->split_ok;
             if (split) {
                 auto whole = tokenize_text(vocab, snapshot->tail + texts[k], images.empty(), true);
                 split = whole.size() == snapshot->tail_tokens.size() + suffix_tokens[k].size() &&
@@ -341,38 +367,46 @@ struct Runtime {
             }
             json result;
             double restore_ms = 0;
+            size_t decoded = 0;
             if (split) {
                 if (!fresh) {
                     auto restore_start = std::chrono::steady_clock::now();
                     restore(*snapshot);
                     restore_ms = since(restore_start);
                 }
-                decode_text(ctx, suffix_tokens[k], snapshot->n_past, n_batch);
+                std::vector<llama_token> tokens(snapshot->rest);
+                tokens.insert(tokens.end(), suffix_tokens[k].begin(), suffix_tokens[k].end());
+                if (images.empty()) decode_plain(ctx, tokens.data(), tokens.size(), n_batch);
+                else decode_text(ctx, tokens.data(), tokens.size(), snapshot->n_past, n_batch, true);
+                decoded = tokens.size();
                 result = candidates(ctx, ids[k], n_vocab);
             } else {
                 ++fallbacks;
                 input_tokens = prefill_full(prefix + texts[k], images);
+                decoded = input_tokens;
                 result = candidates(ctx, ids[k], n_vocab);
                 result["fallback"] = true;
             }
             fresh = false;
             result["input_tokens"] = input_tokens;
             result["suffix_tokens"] = suffix_tokens[k].size();
+            result["decoded_tokens"] = decoded;
             result["restore_ms"] = restore_ms;
             result["prefill_ms"] = since(suffix_start);
             results.push_back(result);
         }
 
         json response = {{"results", results}, {"prefix_tokens", snapshot->prefix_tokens},
-                         {"prefix_ms", prefix_ms}, {"snapshot_ms", snapshot_ms},
-                         {"snapshot_bytes", snapshot->state.size()}, {"cache_hit", cache_hit},
-                         {"fallbacks", fallbacks}};
+                         {"reused_tokens", snapshot->prefix_tokens - snapshot->rest.size()},
+                         {"prefix_ms", prefix_ms}, {"snapshot_ms", snapshot_ms}, {"snapshot_bytes", snapshot->state.size()},
+                         {"cache_hit", cache_hit}, {"fallbacks", fallbacks}};
         if (!images.empty()) {
             response["images"] = snapshot->images;
             response["image_tokens"] = snapshot->image_tokens;
             if (!cache_hit) response["image_preprocess_ms"] = preprocess_ms;
         }
-        if (use_cache && !cache_hit && made.state.size() + key.size() <= PREFIX_CACHE_BYTES) {
+        // Only a saved state is worth keeping; a short text-only prefix has none.
+        if (use_cache && !cache_hit && !made.state.empty() && made.state.size() + key.size() <= PREFIX_CACHE_BYTES) {
             cache.push_front(std::move(made));
             while (cache.size() > PREFIX_CACHE_ENTRIES || cache_bytes() > PREFIX_CACHE_BYTES) cache.pop_back();
         }
