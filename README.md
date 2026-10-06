@@ -121,8 +121,9 @@ are placed in order before the text, and every image uses at least 1,024 of
 the 16,384 context tokens. The questions of one request share one pass over
 the images and the state: the runtime saves that state once and restores it
 for each question, so an extra question costs little more than its own text.
-A small cache keeps the four most recent saved states in host memory, so a
-later request with the same images and state also skips that pass. `usage`
+A small cache keeps the four most recent saved states in host memory (at most
+2 GiB, 1 GiB on macOS), so a later request with the same images and state also
+skips that pass. `usage`
 counts the image tokens once per request. Text must not contain the
 `<__media__>` marker when images are attached.
 

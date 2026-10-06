@@ -71,7 +71,12 @@ static const int IMAGE_MIN_TOKENS = 1024;  // Matches the production Bonsai serv
 // Cross-request cache of prefix snapshots, most recently used first. Entries are matched on the
 // exact prefix text and image strings, never on a hash, so a hit always means identical input.
 static const size_t PREFIX_CACHE_ENTRIES = 4;
+#ifdef __APPLE__
+// Unified memory: snapshots share RAM with the model and the 2 GiB serving headroom.
+static const size_t PREFIX_CACHE_BYTES = size_t(1) << 30;
+#else
 static const size_t PREFIX_CACHE_BYTES = size_t(2) << 30;
+#endif
 static const size_t MAX_SUFFIXES = 2048;
 
 static std::vector<llama_token> tokenize_text(const llama_vocab *vocab, const std::string &s,
