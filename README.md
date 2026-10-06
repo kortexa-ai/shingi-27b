@@ -108,8 +108,9 @@ curl -s http://127.0.0.1:8765/v1/systemone \
 ```
 
 The answer's `noul` is the probability of yes. `GET /v1/version` reports the
-model ID, the GGUF SHA-256, the calibration, the runtime revision and whether
-image input is loaded; `GET /health` reports readiness. The API is compatible
+model ID, the GGUF SHA-256, the calibration, the runtime revision, whether
+image input is loaded and the size of the prefix cache; `GET /health` reports
+readiness. The API is compatible
 with the [TypeSafe](https://docs.typesafe.ai/api) System One primitives.
 
 ### Images
@@ -117,10 +118,13 @@ with the [TypeSafe](https://docs.typesafe.ai/api) System One primitives.
 Add an `images` list to a request: up to 8 PNG, JPEG, GIF or BMP images, each
 as base64 bytes or a `data:image/...;base64,` URL, at most 20 MiB each. They
 are placed in order before the text, and every image uses at least 1,024 of
-the 16,384 context tokens. Each question is a separate pass that reads the
-images again, so every extra question about the same images costs a full
-image pass. Text must not contain the `<__media__>` marker when images are
-attached.
+the 16,384 context tokens. The questions of one request share one pass over
+the images and the state: the runtime saves that state once and restores it
+for each question, so an extra question costs little more than its own text.
+A small cache keeps the four most recent saved states in host memory, so a
+later request with the same images and state also skips that pass. `usage`
+counts the image tokens once per request. Text must not contain the
+`<__media__>` marker when images are attached.
 
 ```bash
 IMAGE=$(base64 < photo.png | tr -d '\n')
