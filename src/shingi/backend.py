@@ -12,6 +12,7 @@ CONTEXT_TOKENS = 16384
 class NativeReadout:
     def __init__(self, executable, model, projector=None):
         self.lock = threading.Lock()
+        self.cache_state = {"entries": 0, "host_bytes": 0}
         _, preload, self.headroom = gpu_profile()
         if gpu_free_mib() < preload:
             raise RuntimeError(f"Shingi 27B requires at least {preload} MiB free on the GPU before loading")
@@ -52,19 +53,48 @@ class NativeReadout:
     def vision(self):
         return bool(self.info.get("vision"))
 
-    def infer(self, prompt, labels, images=None):
+    @property
+    def prefix_reuse(self):
+        return bool(self.info.get("prefix_reuse"))
+
+    @property
+    def prefix_cache(self):
+        """Limits and current host memory of the readout's cross-request prefix cache."""
+        if not self.prefix_reuse:
+            return None
+        return {"max_entries": self.info.get("prefix_cache_entries"), "max_bytes": self.info.get("prefix_cache_bytes"),
+                **self.cache_state}
+
+    def _call(self, request, timeout):
         with self.lock:
             if gpu_free_mib() < self.headroom:
                 self.close()
                 raise RuntimeError("GPU headroom fell below profile floor; native model stopped")
             if self.process.poll() is not None:
                 raise RuntimeError("native readout is not running")
-            request = {"prompt": prompt, "labels": labels}
-            if images:
-                request["images"] = images
             self.process.stdin.write(json.dumps(request) + "\n")
             self.process.stdin.flush()
-            return self._read(300)
+            return self._read(timeout)
+
+    def infer(self, prompt, labels, images=None):
+        request = {"prompt": prompt, "labels": labels}
+        if images:
+            request["images"] = images
+        return self._call(request, 300)
+
+    def infer_prefix(self, prefix, suffixes, images=None, cache=True):
+        """Evaluate prefix once, then read out each (text, labels) suffix from a restored copy of its state.
+
+        With cache=False the readout neither uses nor stores a cross-request prefix snapshot."""
+        request = {"prefix": prefix, "suffixes": [{"text": text, "labels": labels} for text, labels in suffixes]}
+        if images:
+            request["images"] = images
+        if not cache:
+            request["cache"] = False
+        result = self._call(request, 300 + 10 * len(suffixes))
+        if "cache" in result:
+            self.cache_state = result["cache"]
+        return result
 
     def close(self):
         if self.process.poll() is None:

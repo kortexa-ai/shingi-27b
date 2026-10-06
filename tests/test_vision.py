@@ -118,7 +118,8 @@ def test_systemone_images_reach_every_question_in_order():
     assert [call[2] for call in backend.calls] == [[PNG_B64, JPEG_B64]] * 2
     assert all(call[0].count(MEDIA_MARKER) == 2 for call in backend.calls)
     usage = response.json()["usage"]
-    assert usage["images"] == 2 and usage["image_tokens"] == 4096 and usage["input_tokens"] == 2 * (50 + 2048)
+    # The images count once per request; every prompt still counts in full.
+    assert usage["images"] == 2 and usage["image_tokens"] == 2048 and usage["input_tokens"] == 2 * (50 + 2048)
 
 
 def test_images_without_a_projector_are_rejected_before_inference():

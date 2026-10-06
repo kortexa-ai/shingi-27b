@@ -36,17 +36,19 @@ def state_answer(answer):
 def input_answers(body, engine):
     """Answer an SGLang generic /v1/decisions body with the System One engine."""
     images = body.images or []
-    answers, prompt_tokens = {}, 0
+    questions = []
     for q in body.questions:
         if q.type == "choice":
-            question = {"type": "choice", "instructions": q.question,
-                        "criteria": {o.name: o.description for o in q.options}}
+            questions.append({"type": "choice", "instructions": q.question,
+                              "criteria": {o.name: o.description for o in q.options}})
         elif q.type == "score":
-            question = {"type": "score", "instructions": q.question, "criteria": q.levels}
+            questions.append({"type": "score", "instructions": q.question, "criteria": q.levels})
         else:
-            question = {"type": "noul", "instructions": q.question,
-                        "criteria": {k: v for k, v in (("true", q.yes), ("false", q.no)) if v is not None} or None}
-        answer, traces = engine.answer(body.input, question, images, body.temperature)
+            questions.append({"type": "noul", "instructions": q.question,
+                              "criteria": {k: v for k, v in (("true", q.yes), ("false", q.no)) if v is not None} or None})
+    answers, prompt_tokens = {}, 0
+    # All questions share one evaluation of the input and images.
+    for q, (answer, traces) in zip(body.questions, engine.answer_all(body.input, questions, images, body.temperature)):
         prompt_tokens += sum(t["input_tokens"] for t in traces)
         masses = [label_mass(t) for t in traces]
         out = {"type": q.type, "label_mass": None if None in masses else masses[-1]}
@@ -103,7 +105,9 @@ def create_app(engine=None, *, executable=None, model=None, identity=None,
                 "context_tokens": CONTEXT_TOKENS, "kv_cache": "q8_0", "choice_order": "sorted",
                 "single_pass_options": 52, "choice_limit": 255, "image_input": vision,
                 "max_images": MAX_IMAGES if vision else 0,
-                "projector": PROJECTOR if vision else None}
+                "projector": PROJECTOR if vision else None,
+                "prefix_reuse": app.state.engine.prefix_reuse,
+                "prefix_cache": getattr(app.state.engine.backend, "prefix_cache", None)}
 
     @app.get("/v1/models")
     def models():
