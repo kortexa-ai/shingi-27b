@@ -7,10 +7,12 @@ from pathlib import Path
 from .decision import Calibration
 
 HF_REPO = "kortexa-ai/shingi-27b"
+# Hugging Face commit that holds exactly the weights and calibration pinned below.
+HF_REVISION = "d02406fc8974a91ebf45b0e7d46c5381ee42e1c2"
 MODEL_FILE = "shingi-27b.gguf"
-MODEL_SHA256 = "277d970372fac37185bb621341d99bec3c7f1d86c6657d27ca18a6dcf930bd03"
+MODEL_SHA256 = "c62ae5b61e458aa70aa2f51ebbd193d50e00d170cb318c60341bb68c6471242c"
 CALIBRATION_FILE = "calibration.json"
-CALIBRATION_SHA256 = "cb894624520884d7d002c958099fa285ee62eae8d4fdac0fe369e7b519f1f16c"
+CALIBRATION_SHA256 = "bd572be4ef9a72902757f420ea2f5742e73c2627e3f372bf277baba1306f76db"
 RUNTIME = {"repository": "https://github.com/PrismML-Eng/llama.cpp",
            "revision": "d8f26eec76da6d09bb708bcba51ef64b8cd868a3"}
 # Bonsai 2 27B vision projector (Apache-2.0), used unchanged. One pinned source.
@@ -28,7 +30,7 @@ def sha256(path):
 def fetch(filename):
     """Download a release file into the standard Hugging Face cache (honours HF_HOME and HF_TOKEN)."""
     from huggingface_hub import hf_hub_download
-    return Path(hf_hub_download(HF_REPO, filename, revision=os.environ.get("SHINGI_REVISION", "main")))
+    return Path(hf_hub_download(HF_REPO, filename, revision=os.environ.get("SHINGI_REVISION", HF_REVISION)))
 
 
 def fetch_projector():

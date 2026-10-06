@@ -60,7 +60,7 @@ roughly 12.6 s. The model uses about 8–9 GB at the full 16K context.
 | Host | `127.0.0.1` | `--host H` or `SHINGI_HOST` |
 | GPU (Linux) | the GPU with the most free memory | `CUDA_VISIBLE_DEVICES=GPU-<full UUID from nvidia-smi -L>` |
 | Model cache | the standard Hugging Face cache | `HF_HOME` (and `HF_TOKEN` if needed) |
-| Model revision | `main` | `SHINGI_REVISION` |
+| Model revision | the pinned release commit | `SHINGI_REVISION` |
 | Build and checkout | `~/.cache/shingi-27b` | `SHINGI_HOME` |
 | CUDA architectures (Linux) | `86;89;120;121` | `SHINGI_CUDA_ARCHITECTURES` |
 | Image input | on | `--no-vision` (text only, less memory) |

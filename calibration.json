@@ -1,12 +1,12 @@
 {
   "parameters": {
     "temperature": 1.0,
-    "noul_temperature": 1.25,
+    "noul_temperature": 1.0,
     "noul_bias": 0.0
   },
-  "fit_records": 1276,
-  "choice_score_records": 1056,
-  "noul_records": 220,
+  "fit_records": 1696,
+  "choice_score_records": 1356,
+  "noul_records": 340,
   "grid": {
     "temperatures": [
       0.5,
@@ -25,24 +25,20 @@
     ]
   },
   "before": {
-    "choice_score_nll": 0.6340668104525349,
-    "noul_nll": 0.3180781955467112
+    "choice_score_nll": 0.6331164448410751,
+    "noul_nll": 0.20858523761769068
   },
   "after": {
-    "choice_score_nll": 0.6340668104525349,
-    "noul_nll": 0.3072396297437681
+    "choice_score_nll": 0.6331164448410751,
+    "noul_nll": 0.20858523761769068
   },
   "limitations": "Global temperatures only; no weight changes. The yes/no bias is not fitted because the split's yes/no pool is small and its gold-yes share reflects a few sources.",
   "objective": "hard-label NLL on the frozen data v3 calibration split only; temperatures only, yes/no bias fixed at 0",
   "noul_pool": {
-    "records": 220,
-    "gold_yes": 110,
+    "records": 340,
+    "gold_yes": 170,
     "gold_yes_share": 0.5,
     "by_source": {
-      "civil_comments": {
-        "records": 40,
-        "gold_yes": 20
-      },
       "gsm8k_judge": {
         "records": 80,
         "gold_yes": 40
@@ -62,16 +58,24 @@
       "synth_state": {
         "records": 14,
         "gold_yes": 7
+      },
+      "tabfact": {
+        "records": 80,
+        "gold_yes": 40
+      },
+      "tat_qa_judge": {
+        "records": 80,
+        "gold_yes": 40
       }
     }
   },
   "provenance": {
-    "source_revision": "18e4235aae7a8d449d1eb9098bbbe10305790574",
-    "model_sha256": "277d970372fac37185bb621341d99bec3c7f1d86c6657d27ca18a6dcf930bd03",
+    "source_revision": "a0e9b38bbac543ddef50a3aba4c1d799f78a679e",
+    "model_sha256": "c62ae5b61e458aa70aa2f51ebbd193d50e00d170cb318c60341bb68c6471242c",
     "adapter_sha256": null,
     "executable_sha256": "dd71ef5ac08ac18e2028db3dd84dcca7864f12b904fb9a76379c12c0f034c2fb",
-    "data_manifest_sha256": "1e3ebc747608e7010e6f83e9ae203e41892851ab174391c6fcffa5efa9d8d4af",
+    "data_manifest_sha256": "c6eeb7ddf21a94335d6ea8c5b9ea77cc3f1f12db41220c04924d19206542314e",
     "choice_order": "canonical",
-    "predictions_sha256": "9a5d58973b1f04985020b54d5ac0921a7f27ae5dad6df931e81338d48f040aa0"
+    "predictions_sha256": "52c45b33e8a75548de7e65b4b99d58bff1935487153701e30f36101ff852a403"
   }
 }

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_bundled_calibration_matches_the_pinned_release():
     calibration, digest = model.load_calibration(ROOT / "calibration.json")
     assert digest == model.CALIBRATION_SHA256
-    assert calibration == Calibration(temperature=1.0, noul_temperature=1.25, noul_bias=0.0)
+    assert calibration == Calibration(temperature=1.0, noul_temperature=1.0, noul_bias=0.0)
     provenance = json.loads((ROOT / "calibration.json").read_text())["provenance"]
     assert provenance["model_sha256"] == model.MODEL_SHA256 and provenance["adapter_sha256"] is None
 
@@ -27,7 +27,7 @@ def test_fetch_uses_the_release_repo_and_revision(monkeypatch):
     assert model.fetch("calibration.json") == Path("/cache/calibration.json")
     monkeypatch.setenv("SHINGI_REVISION", "abc123")
     model.fetch("shingi-27b.gguf")
-    assert calls == [("kortexa-ai/shingi-27b", "calibration.json", "main"),
+    assert calls == [("kortexa-ai/shingi-27b", "calibration.json", model.HF_REVISION),
                      ("kortexa-ai/shingi-27b", "shingi-27b.gguf", "abc123")]
 
 
@@ -48,7 +48,7 @@ def test_prepare_downloads_omitted_files_and_verifies_them(fake_release):
     assert fetched == ["calibration.json", "shingi-27b.gguf"]
     assert path == weights
     assert identity == {"model": "shingi-27b", "model_sha256": server.MODEL_SHA256, "verified": True}
-    assert calibration.noul_temperature == 1.25 and calibration_sha256 == model.CALIBRATION_SHA256
+    assert calibration.noul_temperature == 1.0 and calibration_sha256 == model.CALIBRATION_SHA256
 
 
 def test_prepare_rejects_wrong_weights_unless_skipped(fake_release, tmp_path):
