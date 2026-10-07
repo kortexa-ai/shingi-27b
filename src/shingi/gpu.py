@@ -1,9 +1,11 @@
-"""Portable CUDA and Apple Metal memory gates. This module never manages system services."""
+"""Portable CUDA, AMD ROCm and Apple Metal memory gates. This module never manages system services."""
+import json
 import os
 import platform
 import re
 import subprocess
 
+MIB = 1024 * 1024
 UNREPORTED = re.compile(r"\[?(N/A|Not Supported)\]?")
 VM_STAT_PAGE_SIZE = re.compile(r"page size of (\d+) bytes")
 # vm_stat counters counted as available: pages the system can hand to a new allocation without
@@ -14,6 +16,43 @@ VM_STAT_AVAILABLE = ("Pages free", "Pages inactive", "Pages speculative")
 
 def is_macos():
     return platform.system() == "Darwin"
+
+
+def is_rocm():
+    # CUDA and ROCm are both Linux, so the OS cannot tell them apart.
+    if is_macos():
+        return False
+    vendor = os.environ.get("SHINGI_GPU_VENDOR", "cuda")
+    if vendor not in ("cuda", "rocm"):
+        raise RuntimeError("SHINGI_GPU_VENDOR must be cuda or rocm")
+    return vendor == "rocm"
+
+
+def rocm_gpu():
+    index = os.environ.get("ROCR_VISIBLE_DEVICES", "")
+    if not re.fullmatch(r"[0-9]+", index):
+        raise RuntimeError("set ROCR_VISIBLE_DEVICES to exactly one GPU index from rocm-smi")
+    return index
+
+
+def rocm_snapshot():
+    index = rocm_gpu()
+    try:
+        raw = subprocess.check_output(
+            ["rocm-smi", "--showproductname", "--showmeminfo", "vram", "--json"], text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("could not query the selected AMD GPU with rocm-smi") from exc
+    try:
+        card = json.loads(raw)["card" + index]
+        total = int(card["VRAM Total Memory (B)"])
+        used = int(card["VRAM Total Used Memory (B)"])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise RuntimeError(f"rocm-smi reported no usable VRAM for card{index}") from exc
+    if total <= 0:
+        raise RuntimeError(f"rocm-smi reported no usable VRAM for card{index}")
+    name = card.get("Card model") or card.get("Card series") or f"AMD card {index}"
+    return {"uuid": index, "name": name, "total_mib": total // MIB,
+            "free_mib": (total - used) // MIB, "memory_source": "rocm-smi"}
 
 
 def darwin_memory_mib():
@@ -65,6 +104,8 @@ def system_memory_mib(path="/proc/meminfo"):
 def gpu_snapshot():
     if is_macos():
         return metal_snapshot()
+    if is_rocm():
+        return rocm_snapshot()
     uuid = selected_gpu()
     try:
         row = subprocess.check_output(

@@ -1,4 +1,5 @@
 import functools
+import json
 
 import pytest
 from shingi import gpu
@@ -11,6 +12,8 @@ UUID = 'GPU-01234567-89ab-cdef-0123-456789abcdef'
 def linux(monkeypatch):
     # The CUDA tests describe Linux; Darwin tests opt in with the `darwin` fixture.
     monkeypatch.setattr(gpu, 'is_macos', lambda: False)
+    monkeypatch.delenv('SHINGI_GPU_VENDOR', raising=False)
+    monkeypatch.delenv('ROCR_VISIBLE_DEVICES', raising=False)
 
 
 @pytest.mark.parametrize('value', ['', '0', '0,1', 'GPU-short', UUID + ',' + UUID])
@@ -163,5 +166,133 @@ def test_darwin_preload_gate_refuses_before_starting_the_runtime(darwin, monkeyp
     started = []
     monkeypatch.setattr('shingi.backend.subprocess.Popen', lambda *a, **kw: started.append(a))
     with pytest.raises(RuntimeError, match='12288 MiB free'):
+        NativeReadout('unused', 'unused')
+    assert started == []
+
+
+MIB = 1024 * 1024
+VRAM_24GIB = 24560 * MIB
+
+REAL_ROCM_SMI = json.dumps({'card0': {
+    'VRAM Total Memory (B)': '8573157376', 'VRAM Total Used Memory (B)': '1217912832',
+    'Card series': 'Navi 10 [Radeon RX 5600 OEM/5600 XT / 5700/5700 XT]',
+    'Card model': 'Radeon RX 5600 XT',
+    'Card vendor': 'Advanced Micro Devices, Inc. [AMD/ATI]', 'Card SKU': '1E4112U'}})
+
+REAL_ROCM_SMI_NO_NAME = json.dumps(
+    {'card0': {'VRAM Total Memory (B)': '8573157376',
+               'VRAM Total Used Memory (B)': '1217912832'}})
+
+
+@pytest.fixture
+def rocm(monkeypatch):
+    monkeypatch.setenv('SHINGI_GPU_VENDOR', 'rocm')
+    monkeypatch.setenv('ROCR_VISIBLE_DEVICES', '0')
+
+
+def card(total, used=0, model='Radeon RX 7900 XTX'):
+    return json.dumps({'card0': {'Card model': model, 'Card series': 'Navi 31',
+                                 'VRAM Total Memory (B)': str(total),
+                                 'VRAM Total Used Memory (B)': str(used)}})
+
+
+def test_cuda_is_the_default_vendor(monkeypatch):
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', UUID)
+    assert gpu.is_rocm() is False
+    assert gpu.selected_gpu() == UUID
+
+
+@pytest.mark.parametrize('value', ['rocm/intel', 'amd', 'CUDA', 'metal', ''])
+def test_rejects_unknown_vendor(value, monkeypatch):
+    monkeypatch.setenv('SHINGI_GPU_VENDOR', value)
+    with pytest.raises(RuntimeError, match='SHINGI_GPU_VENDOR must be cuda or rocm'):
+        gpu.is_rocm()
+
+
+def test_metal_vendor_is_never_rocm(darwin, monkeypatch):
+    monkeypatch.setenv('SHINGI_GPU_VENDOR', 'bogus')
+    assert gpu.is_rocm() is False
+
+
+@pytest.mark.parametrize('value', ['', ' ', '0,1', '0 1', 'GPU-DEADBEEFDEADBEEF',
+                                   '7eff74a0-0000-1000-808f-7e20764e2714', '-0', '0x0'])
+def test_rocm_requires_one_index(value, monkeypatch):
+    monkeypatch.setenv('SHINGI_GPU_VENDOR', 'rocm')
+    monkeypatch.setenv('ROCR_VISIBLE_DEVICES', value)
+    with pytest.raises(RuntimeError, match='ROCR_VISIBLE_DEVICES to exactly one GPU index'):
+        gpu.rocm_gpu()
+
+
+def test_rocm_ignores_cuda_visible_devices(rocm, monkeypatch):
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', UUID)
+    assert gpu.rocm_gpu() == '0'
+
+
+def test_rocm_converts_bytes_to_mib(rocm, monkeypatch):
+    monkeypatch.setattr(gpu.subprocess, 'check_output',
+                        lambda *a, **kw: card(VRAM_24GIB, 800 * MIB))
+    snapshot = gpu.gpu_snapshot()
+    assert snapshot['total_mib'] == 24560
+    assert snapshot['free_mib'] == 24560 - 800
+    assert snapshot['uuid'] == '0'
+    assert snapshot['memory_source'] == 'rocm-smi'
+    assert snapshot['name'] == 'Radeon RX 7900 XTX'
+
+
+def test_rocm_queries_rocm_smi(rocm, monkeypatch):
+    seen = {}
+
+    def record(*args, **kwargs):
+        seen['argv'] = args[0]
+        return card(VRAM_24GIB)
+
+    monkeypatch.setattr(gpu.subprocess, 'check_output', record)
+    gpu.gpu_snapshot()
+    assert seen['argv'] == ['rocm-smi', '--showproductname', '--showmeminfo', 'vram', '--json']
+
+
+def test_rocm_reads_real_rocm_smi_output(rocm, monkeypatch):
+    monkeypatch.setattr(gpu.subprocess, 'check_output', lambda *a, **kw: REAL_ROCM_SMI)
+    snapshot = gpu.gpu_snapshot()
+    assert snapshot['name'] == 'Radeon RX 5600 XT'
+    assert snapshot['total_mib'] == 8573157376 // MIB
+    assert snapshot['free_mib'] == (8573157376 - 1217912832) // MIB
+
+
+def test_rocm_starts_when_the_name_is_missing(rocm, monkeypatch):
+    monkeypatch.setattr(gpu.subprocess, 'check_output', lambda *a, **kw: REAL_ROCM_SMI_NO_NAME)
+    snapshot = gpu.gpu_snapshot()
+    assert snapshot['name'] == 'AMD card 0'
+    assert snapshot['total_mib'] == 8176
+
+
+@pytest.mark.parametrize('payload', ['', 'not json', '{}', '{"card0": {}}',
+                                     '{"card0": {"VRAM Total Memory (B)": "lots"}}',
+                                     '{"card0": {"VRAM Total Memory (B)": "0"}}'])
+def test_rocm_rejects_unusable_payload(payload, rocm, monkeypatch):
+    monkeypatch.setattr(gpu.subprocess, 'check_output', lambda *a, **kw: payload)
+    with pytest.raises(RuntimeError, match='no usable VRAM for card0'):
+        gpu.gpu_snapshot()
+
+
+def test_rocm_driver_failure_is_backend_unavailability(rocm, monkeypatch):
+    def fail(*args, **kwargs):
+        raise FileNotFoundError('rocm-smi')
+
+    monkeypatch.setattr(gpu.subprocess, 'check_output', fail)
+    with pytest.raises(RuntimeError, match='could not query'):
+        gpu.gpu_snapshot()
+
+
+def test_rocm_profile_uses_the_shared_floor(rocm, monkeypatch):
+    monkeypatch.setattr(gpu.subprocess, 'check_output', lambda *a, **kw: card(VRAM_24GIB))
+    assert gpu.gpu_profile() == ('0', 14 * 1024, 4 * 1024)
+
+
+def test_rocm_preload_gate_refuses_before_starting_the_runtime(rocm, monkeypatch):
+    monkeypatch.setattr(gpu.subprocess, 'check_output', lambda *a, **kw: card(16368 * MIB))
+    started = []
+    monkeypatch.setattr('shingi.backend.subprocess.Popen', lambda *a, **kw: started.append(a))
+    with pytest.raises(RuntimeError, match='at least 20 GiB'):
         NativeReadout('unused', 'unused')
     assert started == []
