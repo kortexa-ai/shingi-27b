@@ -3,7 +3,8 @@
 // With an optional vision projector, requests may carry images that Prism's multimodal
 // library (mtmd) encodes in place of media markers in the prompt.
 // A request may also carry a shared prefix and several suffixes: the prefix is evaluated once,
-// its sequence state is saved, and each suffix is read out from a restored copy of that state.
+// its sequence state is saved, and suffixes fork independent sequences from that state.
+// Parallel mode shares one model and one bounded KV pool; serial mode remains a comparison path.
 #include "llama.h"
 #include "ggml-backend.h"
 #include "mtmd.h"
@@ -103,8 +104,8 @@ static std::vector<llama_token> label_ids(const llama_vocab *vocab, const json &
 }
 
 // Candidate logits of the last evaluated token and the log of the full-vocabulary normalizer.
-static json candidates(llama_context *ctx, const std::vector<llama_token> &ids, int n_vocab) {
-    const float *all = llama_get_logits_ith(ctx, -1);
+static json candidates(llama_context *ctx, const std::vector<llama_token> &ids, int n_vocab, int output = -1) {
+    const float *all = llama_get_logits_ith(ctx, output);
     if (!all) throw std::runtime_error("no final logits");
     std::vector<double> logits;
     for (auto id : ids) {
@@ -212,11 +213,11 @@ struct Runtime {
     std::string marker;
     int n_vocab;
     int n_batch;
-    std::list<Snapshot> cache;
+    std::list<std::shared_ptr<Snapshot>> cache;
 
     size_t cache_bytes() const {
         size_t n = 0;
-        for (const auto &e : cache) n += e.state.size() + e.key.size();
+        for (const auto &e : cache) n += e->state.size() + e->key.size();
         return n;
     }
     json cache_info() const { return {{"entries", cache.size()}, {"host_bytes", cache_bytes()}}; }
@@ -228,7 +229,7 @@ struct Runtime {
     }
 
     // Clear memory and evaluate a complete prompt (fallback for a suffix whose tokens differ).
-    size_t prefill_full(const std::string &prompt, const json &images) {
+    size_t prefill_full(const std::string &prompt, const json &images, size_t *image_tokens = nullptr) {
         llama_memory_clear(llama_get_memory(ctx), true);
         if (images.empty()) {
             auto tokens = tokenize(vocab, prompt, true);
@@ -240,6 +241,7 @@ struct Runtime {
         mtmd::input_chunks chunks;
         media_chunks(vision, prompt, images, marker, chunks);
         size_t n = mtmd_helper_get_n_tokens(chunks.ptr.get());
+        if (image_tokens) *image_tokens = image_token_count(chunks);
         if (n > llama_n_ctx(ctx)) throw std::invalid_argument("prompt with images exceeds context; never truncated");
         llama_pos n_past = 0;
         if (mtmd_helper_eval_chunks(vision, ctx, chunks.ptr.get(), 0, 0, n_batch, true, &n_past) != 0)
@@ -312,7 +314,7 @@ struct Runtime {
         const bool use_cache = !request.contains("cache") || request.at("cache").get<bool>();
         if (!images.empty() && !vision)
             throw std::invalid_argument("image input requires the vision projector, which is not loaded");
-        if (count_markers(prefix, marker) != images.size())
+        if (!images.empty() && count_markers(prefix, marker) != images.size())
             throw std::invalid_argument("the prefix must contain one media marker per image");
 
         std::string key;
@@ -325,7 +327,7 @@ struct Runtime {
         std::vector<std::vector<llama_token>> ids, suffix_tokens;
         for (const auto &suffix : suffixes) {
             texts.push_back(suffix.at("text").get<std::string>());
-            if (count_markers(texts.back(), marker) != 0)
+            if (!images.empty() && count_markers(texts.back(), marker) != 0)
                 throw std::invalid_argument("a suffix must not contain the media marker");
             ids.push_back(label_ids(vocab, suffix.at("labels")));
             suffix_tokens.push_back(tokenize_text(vocab, texts.back(), false, true));
@@ -338,9 +340,9 @@ struct Runtime {
         Snapshot made;
         if (use_cache)
             for (auto it = cache.begin(); it != cache.end(); ++it)
-                if (it->key == key) {
+                if ((*it)->key == key) {
                     cache.splice(cache.begin(), cache, it);
-                    snapshot = &cache.front();
+                    snapshot = cache.front().get();
                     cache_hit = true;
                     break;
                 }
@@ -412,18 +414,245 @@ struct Runtime {
         }
         // Only a saved state is worth keeping; a short text-only prefix has none.
         if (use_cache && !cache_hit && !made.state.empty() && made.state.size() + key.size() <= PREFIX_CACHE_BYTES) {
-            cache.push_front(std::move(made));
+            cache.push_front(std::make_shared<Snapshot>(std::move(made)));
             while (cache.size() > PREFIX_CACHE_ENTRIES || cache_bytes() > PREFIX_CACHE_BYTES) cache.pop_back();
         }
         response["cache"] = cache_info();
         response["total_ms"] = since(total_start);
         return response;
     }
+    // A job owns one independent sequence. Prefix states are forked on the device;
+    // tokens from several jobs enter one llama_decode call, and logits are read by
+    // their batch index, never from whichever question happened to finish last.
+    struct Job {
+        size_t request, index;
+        std::shared_ptr<Snapshot> prefix;
+        std::vector<llama_token> tokens, ids;
+        size_t input_tokens, suffix_tokens;
+        llama_pos past = 0;
+        size_t offset = 0;
+        double decode_ms = 0;
+        double restore_ms = 0;
+    };
+
+    json parallel_requests(const json &requests, int slots) {
+        if (!requests.is_array() || requests.empty() || requests.size() > 4)
+            throw std::invalid_argument("batch must contain 1 through 4 requests");
+        auto since = [](auto t) {
+            return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+        };
+        const auto started = std::chrono::steady_clock::now();
+        json responses = json::array();
+        std::vector<Job> jobs;
+        // Prepare each request independently. A bad member does not discard valid peers.
+        for (size_t r = 0; r < requests.size(); ++r) {
+            responses.push_back(json::object());
+            const auto &req = requests[r];
+            const size_t first_job = jobs.size();
+            try {
+                const json images = req.value("images", json::array());
+                if (!images.is_array() || images.size() > MAX_IMAGES)
+                    throw std::invalid_argument("images must be a list of at most 8 base64 strings");
+                if (!req.contains("prefix")) {
+                    auto ids = label_ids(vocab, req.at("labels"));
+                    const std::string prompt = req.at("prompt");
+                    if (!images.empty()) {
+                        // Image encoding is shared within prefix requests; a standalone image
+                        // prompt uses the same mtmd path as the established serial readout.
+                        auto t = std::chrono::steady_clock::now();
+                        size_t image_tokens = 0;
+                        auto n = prefill_full(prompt, images, &image_tokens);
+                        auto result = candidates(ctx, ids, n_vocab);
+                        result.update({{"input_tokens", n}, {"images", images.size()},
+                                       {"image_tokens", image_tokens}, {"prefill_ms", since(t)}});
+                        responses[r] = std::move(result);
+                        continue;
+                    }
+                    auto tokens = tokenize(vocab, prompt, true);
+                    if (tokens.empty() || tokens.size() > llama_n_ctx(ctx))
+                        throw std::invalid_argument("prompt exceeds context or is empty; never truncated");
+                    size_t n = tokens.size();
+                    jobs.push_back({r, 0, nullptr, std::move(tokens), std::move(ids), n, n});
+                    continue;
+                }
+                const std::string prefix = req.at("prefix");
+                const auto &suffixes = req.at("suffixes");
+                if (!suffixes.is_array() || suffixes.empty() || suffixes.size() > MAX_SUFFIXES)
+                    throw std::invalid_argument("suffixes must be a non-empty list of at most 2048 entries");
+                if (!images.empty() && count_markers(prefix, marker) != images.size())
+                    throw std::invalid_argument("the prefix must contain one media marker per image");
+                std::string key;
+                auto add_key = [&key](const std::string &part) { key += std::to_string(part.size()) + ":" + part; };
+                add_key(prefix);
+                for (const auto &image : images) add_key(image.get<std::string>());
+                bool use_cache = req.value("cache", true), hit = false;
+                std::shared_ptr<Snapshot> snapshot;
+                if (use_cache) for (auto it = cache.begin(); it != cache.end(); ++it) {
+                    if ((*it)->key != key) continue;
+                    snapshot = *it;
+                    cache.splice(cache.begin(), cache, it);
+                    hit = true;
+                    break;
+                }
+                double prefix_ms = 0, preprocess_ms = 0, snapshot_ms = 0;
+                if (!snapshot) {
+                    snapshot = std::make_shared<Snapshot>();
+                    snapshot->key = key;
+                    auto t = std::chrono::steady_clock::now();
+                    evaluate_prefix(prefix, images, *snapshot, preprocess_ms, snapshot_ms);
+                    prefix_ms = since(t);
+                    if (use_cache && !snapshot->state.empty() && snapshot->state.size() + key.size() <= PREFIX_CACHE_BYTES) {
+                        cache.push_front(snapshot);
+                        while (cache.size() > PREFIX_CACHE_ENTRIES || cache_bytes() > PREFIX_CACHE_BYTES) cache.pop_back();
+                    }
+                }
+                auto &response = responses[r];
+                response = {{"results", json::array()}, {"prefix_tokens", snapshot->prefix_tokens},
+                    {"reused_tokens", snapshot->prefix_tokens - snapshot->rest.size()},
+                    {"prefix_ms", prefix_ms}, {"snapshot_ms", snapshot_ms}, {"snapshot_bytes", snapshot->state.size()},
+                    {"cache_hit", hit}, {"fallbacks", 0}, {"max_sequences", 0}};
+                if (!images.empty()) response.update({{"images", snapshot->images}, {"image_tokens", snapshot->image_tokens},
+                                                     {"image_preprocess_ms", preprocess_ms}});
+                for (size_t i = 0; i < suffixes.size(); ++i) {
+                    response["results"].push_back(nullptr);
+                    const std::string text = suffixes[i].at("text");
+                    if (!images.empty() && count_markers(text, marker)) throw std::invalid_argument("a suffix must not contain the media marker");
+                    auto ids = label_ids(vocab, suffixes[i].at("labels"));
+                    auto suffix = tokenize_text(vocab, text, false, true);
+                    if (suffix.empty()) throw std::invalid_argument("a suffix must not be empty");
+                    auto whole = tokenize_text(vocab, snapshot->tail + text, images.empty(), true);
+                    bool split = snapshot->split_ok && whole.size() == snapshot->tail_tokens.size() + suffix.size() &&
+                        std::equal(snapshot->tail_tokens.begin(), snapshot->tail_tokens.end(), whole.begin()) &&
+                        std::equal(suffix.begin(), suffix.end(), whole.begin() + snapshot->tail_tokens.size());
+                    size_t n = snapshot->prefix_tokens + suffix.size();
+                    if (n > llama_n_ctx(ctx)) throw std::invalid_argument("prompt exceeds context; never truncated");
+                    if (!split) {
+                        response["fallbacks"] = response["fallbacks"].get<size_t>() + 1;
+                        auto t = std::chrono::steady_clock::now();
+                        n = prefill_full(prefix + text, images);
+                        auto result = candidates(ctx, ids, n_vocab);
+                        result.update({{"input_tokens", n}, {"suffix_tokens", suffix.size()}, {"decoded_tokens", n},
+                                       {"fallback", true}, {"restore_ms", 0}, {"prefill_ms", since(t)}});
+                        response["results"][i] = std::move(result);
+                        continue;
+                    }
+                    auto tokens = snapshot->rest;
+                    tokens.insert(tokens.end(), suffix.begin(), suffix.end());
+                    jobs.push_back({r, i, snapshot, std::move(tokens), std::move(ids), n, suffix.size(), snapshot->n_past});
+                }
+            } catch (const std::invalid_argument &e) {
+                jobs.resize(first_job);
+                responses[r] = {{"error", e.what()}, {"error_kind", "input"}};
+            } catch (const json::exception &e) {
+                jobs.resize(first_job);
+                responses[r] = {{"error", e.what()}, {"error_kind", "input"}};
+            }
+        }
+        auto mem = llama_get_memory(ctx);
+        for (size_t begin = 0; begin < jobs.size();) {
+            // Admission uses the actual shared token budget, not a full context reservation
+            // per slot. A long request can use the complete context by running alone.
+            size_t end = begin, budget = 0;
+            std::set<const Snapshot *> prefixes;
+            while (end < jobs.size() && end - begin < static_cast<size_t>(slots)) {
+                auto &j = jobs[end];
+                size_t added = j.tokens.size();
+                if (j.prefix && !prefixes.count(j.prefix.get()))
+                    added += j.prefix->prefix_tokens - j.prefix->rest.size(); // image tokens can share positions
+                if (budget + added > llama_n_ctx(ctx)) break;
+                budget += added;
+                if (j.prefix) prefixes.insert(j.prefix.get());
+                ++end;
+            }
+            if (end == begin) throw std::runtime_error("no job fits the shared context");
+            llama_memory_clear(mem, true);
+            for (const auto *prefix : prefixes) {
+                if (!llama_memory_seq_rm(mem, 0, -1, -1)) throw std::runtime_error("prefix slot reset failed");
+                auto restore_start = std::chrono::steady_clock::now();
+                if (!prefix->state.empty() && llama_state_seq_set_data(ctx, prefix->state.data(), prefix->state.size(), 0) != prefix->state.size())
+                    throw std::runtime_error("restoring the prefix sequence state failed");
+                double restore_ms = since(restore_start);
+                size_t users = 0;
+                for (size_t i = begin; i < end; ++i) users += jobs[i].prefix.get() == prefix;
+                for (size_t i = begin; i < end; ++i) if (jobs[i].prefix.get() == prefix) jobs[i].restore_ms += restore_ms / users;
+                std::set<size_t> credited;
+                for (size_t i = begin; i < end; ++i) if (jobs[i].prefix.get() == prefix && credited.insert(jobs[i].request).second) {
+                    auto &response = responses[jobs[i].request];
+                    response["prefix_restore_ms"] = response.value("prefix_restore_ms", 0.0) + restore_ms;
+                }
+                for (size_t i = begin; i < end; ++i) if (jobs[i].prefix.get() == prefix && jobs[i].past)
+                    llama_memory_seq_cp(mem, 0, static_cast<llama_seq_id>(i - begin + 1), -1, -1);
+            }
+            llama_memory_seq_rm(mem, 0, -1, -1);
+            llama_batch batch = llama_batch_init(n_batch, 0, 1);
+            try {
+                while (true) {
+                    size_t active = 0, take = n_batch;
+                    for (size_t i = begin; i < end; ++i) if (jobs[i].offset < jobs[i].tokens.size()) {
+                        ++active;
+                        take = std::min(take, jobs[i].tokens.size() - jobs[i].offset);
+                    }
+                    if (!active) break;
+                    take = std::min(take, static_cast<size_t>(n_batch) / active);
+                    batch.n_tokens = 0;
+                    std::vector<std::pair<size_t, int>> finished;
+                    for (size_t i = begin; i < end; ++i) {
+                        auto &j = jobs[i];
+                        if (j.offset == j.tokens.size()) continue;
+                        for (size_t k = 0; k < take; ++k) {
+                            int b = batch.n_tokens++;
+                            batch.token[b] = j.tokens[j.offset];
+                            batch.pos[b] = j.past + j.offset++;
+                            batch.n_seq_id[b] = 1;
+                            batch.seq_id[b][0] = static_cast<llama_seq_id>(i - begin + 1);
+                            batch.logits[b] = j.offset == j.tokens.size();
+                        }
+                        if (j.offset == j.tokens.size()) finished.emplace_back(i, batch.n_tokens - 1);
+                    }
+                    auto t = std::chrono::steady_clock::now();
+                    if (llama_decode(ctx, batch) != 0) throw std::runtime_error("parallel llama_decode failed");
+                    double elapsed = since(t);
+                    for (size_t i = begin; i < end; ++i) jobs[i].decode_ms += elapsed / (end - begin);
+                    for (const auto &[i, output] : finished) {
+                        auto &j = jobs[i];
+                        json result = candidates(ctx, j.ids, n_vocab, output);
+                        result.update({{"input_tokens", j.input_tokens}, {"suffix_tokens", j.suffix_tokens},
+                            {"decoded_tokens", j.tokens.size()}, {"restore_ms", j.restore_ms}, {"prefill_ms", j.decode_ms + j.restore_ms},
+                            {"batch_sequences", end - begin}});
+                        auto &response = responses[j.request];
+                        if (response.contains("results")) {
+                            response["results"][j.index] = std::move(result);
+                            response["max_sequences"] = std::max(response["max_sequences"].get<size_t>(), end - begin);
+                        } else response = std::move(result);
+                    }
+                }
+            } catch (...) {
+                llama_batch_free(batch);
+                llama_memory_clear(mem, true);
+                throw;
+            }
+            llama_batch_free(batch);
+            begin = end;
+        }
+        llama_memory_clear(mem, true);
+        for (auto &response : responses) {
+            response["cache"] = cache_info();
+            response["total_ms"] = since(started);
+        }
+        return responses;
+    }
+
 };
 
 int main(int argc, char **argv) {
+    int slots = 1;
+    if (argc >= 5 && std::string(argv[argc - 2]) == "--parallel") {
+        slots = std::atoi(argv[argc - 1]);
+        argc -= 2;
+    }
+    if (slots < 1 || slots > 4) { std::cerr << "parallel must be 1 through 4\n"; return 2; }
     if (argc != 3 && argc != 4) {
-        std::cerr << "usage: readout MODEL.gguf CONTEXT_TOKENS [MMPROJ.gguf]\n";
+        std::cerr << "usage: readout MODEL.gguf CONTEXT_TOKENS [MMPROJ.gguf] [--parallel 1..4]\n";
         return 2;
     }
 #ifndef __APPLE__
@@ -455,6 +684,8 @@ int main(int argc, char **argv) {
     if (!model) return 1;
     auto cp = llama_context_default_params();
     cp.n_ctx = context;
+    cp.n_seq_max = slots > 1 ? slots + 1 : 1; // sequence 0 stages shared prefixes
+    cp.kv_unified = true;
     cp.n_batch = 512;
     cp.n_ubatch = 512;
     cp.n_threads = 12;
@@ -489,12 +720,21 @@ int main(int argc, char **argv) {
                        {"media_marker", marker}, {"max_images", MAX_IMAGES},
                        {"image_min_tokens", IMAGE_MIN_TOKENS}, {"prefix_reuse", true},
                        {"prefix_cache_entries", PREFIX_CACHE_ENTRIES},
-                       {"prefix_cache_bytes", PREFIX_CACHE_BYTES}}).dump() << std::endl;
+                       {"prefix_cache_bytes", PREFIX_CACHE_BYTES}, {"parallel_slots", slots}}).dump() << std::endl;
     Runtime runtime{ctx, vocab, vision.get(), marker, n_vocab, static_cast<int>(cp.n_batch), {}};
     std::string line;
     while (std::getline(std::cin, line)) {
         try {
             auto request = json::parse(line);
+            if (request.contains("batch")) {
+                if (slots == 1) throw std::invalid_argument("batch transport requires parallel > 1");
+                std::cout << json({{"responses", runtime.parallel_requests(request.at("batch"), slots)}}).dump() << std::endl;
+                continue;
+            }
+            if (slots > 1) {
+                std::cout << runtime.parallel_requests(json::array({request}), slots)[0].dump() << std::endl;
+                continue;
+            }
             if (request.contains("prefix")) {
                 std::cout << runtime.prefix_request(request).dump() << std::endl;
                 continue;

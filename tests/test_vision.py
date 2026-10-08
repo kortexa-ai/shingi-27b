@@ -270,8 +270,9 @@ def test_generic_body_accepts_disabled_thinking_and_the_served_format():
 
 FAKE_READOUT = textwrap.dedent("""
     import json, sys
-    vision = len(sys.argv) == 4
-    print(json.dumps({"ready": True, "vision": vision, "argv": sys.argv[1:]}), flush=True)
+    args = sys.argv[1:-2] if sys.argv[-2:-1] == ["--parallel"] else sys.argv[1:]
+    vision = len(args) == 3
+    print(json.dumps({"ready": True, "vision": vision, "argv": args}), flush=True)
     for line in sys.stdin:
         print(json.dumps({"logits": [0.0, 0.0], "input_tokens": 1, "echo": line}), flush=True)
 """)

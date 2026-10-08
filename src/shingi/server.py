@@ -8,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import uvicorn
 
-from .backend import CONTEXT_TOKENS, NativeReadout
+from .backend import CONTEXT_TOKENS, DEFAULT_PARALLEL, NativeReadout
 from .decision import Calibration, DecisionEngine, MODEL_ID, label_mass
 from .model import (CALIBRATION_FILE, CALIBRATION_SHA256, MODEL_FILE, MODEL_SHA256, PROJECTOR, RUNTIME,
                     fetch, fetch_projector, load_calibration, sha256, verify)
@@ -65,7 +65,7 @@ def input_answers(body, engine):
 
 
 def create_app(engine=None, *, executable=None, model=None, identity=None,
-               calibration=Calibration(), calibration_sha256=None, projector=None):
+               calibration=Calibration(), calibration_sha256=None, projector=None, parallel=DEFAULT_PARALLEL):
     identity = identity or {"model": MODEL_ID, "model_sha256": None, "verified": False}
 
     @asynccontextmanager
@@ -73,7 +73,7 @@ def create_app(engine=None, *, executable=None, model=None, identity=None,
         backend = None
         try:
             if engine is None:
-                backend = NativeReadout(executable, model, projector)
+                backend = NativeReadout(executable, model, projector, parallel=parallel)
                 app.state.engine = DecisionEngine(backend, calibration, model_id=identity["model"])
             yield
         finally:
@@ -102,7 +102,8 @@ def create_app(engine=None, *, executable=None, model=None, identity=None,
         vision = app.state.engine.vision
         return {**identity, "calibration": asdict(app.state.engine.calibration),
                 "calibration_sha256": calibration_sha256, "runtime": RUNTIME,
-                "context_tokens": CONTEXT_TOKENS, "kv_cache": "q8_0", "choice_order": "sorted",
+                "context_tokens": CONTEXT_TOKENS, "parallel_slots": getattr(app.state.engine.backend, "parallel", 1),
+                "kv_cache": "q8_0", "choice_order": "sorted",
                 "single_pass_options": 52, "choice_limit": 255, "image_input": vision,
                 "max_images": MAX_IMAGES if vision else 0,
                 "projector": PROJECTOR if vision else None,
@@ -193,6 +194,8 @@ def main():
     parser.add_argument("--model", type=Path, help=f"{MODEL_FILE}; downloaded from Hugging Face when omitted")
     parser.add_argument("--calibration", type=Path,
                         help=f"{CALIBRATION_FILE}; downloaded from Hugging Face when omitted")
+    parser.add_argument("--parallel", type=int, choices=range(1, 5), default=DEFAULT_PARALLEL,
+                        help="independent sequences sharing model weights and the 16K context pool (1–4)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--mmproj", type=Path,
@@ -212,7 +215,7 @@ def main():
         projector, identity["projector_verified"] = prepare_projector(args.mmproj, args.skip_verify)
     # The API has no authentication. Bind beyond localhost only behind your own access control.
     uvicorn.run(create_app(executable=args.executable, model=model, identity=identity,
-                           calibration=calibration, calibration_sha256=calibration_sha256, projector=projector),
+                           calibration=calibration, calibration_sha256=calibration_sha256, projector=projector, parallel=args.parallel),
                 host=args.host, port=args.port)
 
 

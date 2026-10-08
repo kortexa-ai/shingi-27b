@@ -31,8 +31,9 @@ vision projector (about 0.6 GB), verifies their SHA-256, and starts the API on
 
 - Linux on x86-64 or aarch64 with an NVIDIA GPU, or macOS on Apple Silicon
   (see [macOS](#macos)).
-- An NVIDIA GPU with at least 20 GiB of memory. The model uses about 9.2 GiB with image input (8.2 GiB with `--no-vision`) at
-  the full 16K context. Designed for RTX 4090 class 24 GB cards; the NVIDIA DGX Spark
+- An NVIDIA GPU with at least 20 GiB of memory. Four-sequence serving with image input
+  used about 9.8 GiB in the RTX PRO 6000 checks at the full 16K context; memory depends
+  on the device, sequence count and workload. Designed for RTX 4090 class 24 GB cards; the NVIDIA DGX Spark
   (GB10, unified memory) is supported.
   Tested on RTX PRO 6000, RTX 4090 and DGX Spark; speed is on the model card.
 - Free memory at startup: 14 GiB on cards up to 32 GiB, 30 GiB on larger cards.
@@ -64,6 +65,7 @@ roughly 12.6 s. The model uses about 8–9 GB at the full 16K context.
 | Build and checkout | `~/.cache/shingi-27b` | `SHINGI_HOME` |
 | CUDA architectures (Linux) | `86;89;120;121` | `SHINGI_CUDA_ARCHITECTURES` |
 | Image input | on | `--no-vision` (text only, less memory) |
+| Parallel sequences | 4 on CUDA, 1 on macOS | `--parallel 1` through `--parallel 4` |
 
 Pass arguments through the one-liner with `bash -s --`:
 
@@ -109,9 +111,29 @@ curl -s http://127.0.0.1:8765/v1/systemone \
 
 The answer's `noul` is the probability of yes. `GET /v1/version` reports the
 model ID, the GGUF SHA-256, the calibration, the runtime revision, whether
-image input is loaded and the size of the prefix cache; `GET /health` reports
+image input is loaded, the parallel sequence count and the size of the prefix cache; `GET /health` reports
 readiness. The API is compatible
 with the [TypeSafe](https://docs.typesafe.ai/api) System One primitives.
+
+### Parallel requests and shared state
+
+The CUDA worker batches concurrent callers and questions from the same request into
+up to four independent sequences. They share one loaded model and a 16,384-token
+KV-memory pool. Identical cached prefixes can share their device state; unrelated
+requests keep separate state. A long request can use the whole context pool, so fewer
+sequences run together when their combined tokens would exceed it. Oversized prompts
+still return an error instead of being truncated.
+
+The Python transport admits at most 64 waiting calls and gives simultaneous callers
+a 2 ms batching window. Queue overflow returns 503. Image encoding runs serially;
+questions about a shared image prefix can then run together. `--parallel 1` retains
+the serial comparison path. macOS defaults to that path; CUDA measurements do not
+establish parallel Metal performance.
+
+Different batch shapes can slightly change floating-point scores. See the
+[parallel inference checks](results/parallel-decisions/REPORT.md) for correctness,
+probability differences, latency, memory and reproducible commands. More slots do not
+guarantee a speedup for every workload. Model weights and calibration are unchanged.
 
 ### Images
 
@@ -119,8 +141,10 @@ Add an `images` list to a request: up to 8 PNG, JPEG, GIF or BMP images, each
 as base64 bytes or a `data:image/...;base64,` URL, at most 20 MiB each. They
 are placed in order before the text, and every image uses at least 1,024 of
 the 16,384 context tokens. The questions of one request share one pass over
-the images and the state: the runtime saves that state once and restores it
-for each question, so an extra question costs little more than its own text.
+the images and the state. The runtime saves complete prefix blocks and, in parallel
+mode, forks a restored prefix into independent question sequences. The remaining
+prefix tokens and each question still require evaluation; restore and scheduling
+costs are included in the measured latency.
 A small cache keeps the four most recent saved states in host memory (at most
 2 GiB, 1 GiB on macOS), so a later request with the same images and state also
 skips that pass. `usage`
