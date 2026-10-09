@@ -16,12 +16,13 @@ STAMP="$READOUT.stamp"
 if [ "$(uname -s)" = Darwin ]; then
     # Metal builds use their own build directory and stamp, so a CUDA build is never reused.
     BUILD="$PRISM/build-metal"
-    stamp="$PRISM_REVISION Darwin-metal mtmd $(shasum -a 256 "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
+    stamp="$PRISM_REVISION Darwin-metal mtmd quantized-device-state-v1 $(shasum -a 256 "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
 else
     BUILD="$PRISM/build"
-    stamp="$PRISM_REVISION $ARCHITECTURES mtmd $(sha256sum "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
+    stamp="$PRISM_REVISION $ARCHITECTURES mtmd quantized-device-state-v1 $(sha256sum "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
 fi
 if [ -x "$READOUT" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$stamp" ]; then
+    python3 "$ROOT/scripts/patch-prism.py" "$PRISM" --check
     echo "shingi-27b: runtime already built at $PRISM_REVISION"
     exit 0
 fi
@@ -34,16 +35,16 @@ else
 fi
 if [ ! -e "$PRISM" ]; then
     mkdir -p "$SHINGI_HOME"
-    git clone --quiet --no-checkout "$PRISM_URL" "$PRISM"
+    git init --quiet "$PRISM"
+    git -C "$PRISM" remote add origin "$PRISM_URL"
 fi
 if [ "$(git -C "$PRISM" rev-parse HEAD 2>/dev/null)" != "$PRISM_REVISION" ]; then
-    git -C "$PRISM" fetch --quiet origin "$PRISM_REVISION"
+    git -C "$PRISM" fetch --quiet --depth 1 origin "$PRISM_REVISION"
     git -C "$PRISM" checkout --quiet --detach "$PRISM_REVISION"
 fi
-if [ -n "$(git -C "$PRISM" status --porcelain --untracked-files=no)" ]; then
-    echo "shingi-27b: $PRISM has local changes; move it away and run again" >&2
-    exit 1
-fi
+# Checks the exact revision and full source contents; accepts only the pristine
+# checkout or this exact managed patch, and refuses unrelated local changes.
+python3 "$ROOT/scripts/patch-prism.py" "$PRISM"
 
 if [ "$(uname -s)" = Darwin ]; then
     jobs="$(sysctl -n hw.ncpu)"

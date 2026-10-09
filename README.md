@@ -37,6 +37,7 @@ vision projector (about 0.6 GB), verifies their SHA-256, and starts the API on
   (GB10, unified memory) is supported.
   Tested on RTX PRO 6000, RTX 4090 and DGX Spark; speed is on the model card.
 - Free memory at startup: 14 GiB on cards up to 32 GiB, 30 GiB on larger cards.
+  Add the configured VRAM cache budget (1 GiB by default) to those startup floors.
   At least 4 GiB (10 GiB on larger cards) must stay free while serving.
 - NVIDIA driver, CUDA toolkit 12.9 or later (`nvcc`), CMake, a C++17 compiler
   and Git. `run.sh` installs [uv](https://docs.astral.sh/uv/) if it is missing.
@@ -66,6 +67,8 @@ roughly 12.6 s. The model uses about 8–9 GB at the full 16K context.
 | CUDA architectures (Linux) | `86;89;120;121` | `SHINGI_CUDA_ARCHITECTURES` |
 | Image input | on | `--no-vision` (text only, less memory) |
 | Parallel sequences | 4 on CUDA, 1 on macOS | `--parallel 1` through `--parallel 4` |
+| Prefix cache location | `vram` on CUDA, `host` on macOS | `--prefix-cache vram`, `host` or `off` |
+| Prefix cache budget | 1024 MiB | `--prefix-cache-mib N` (0 disables caching) |
 
 Pass arguments through the one-liner with `bash -s --`:
 
@@ -127,8 +130,8 @@ still return an error instead of being truncated.
 The Python transport admits at most 64 waiting calls and gives simultaneous callers
 a 2 ms batching window. Keeping twice the sequence count in flight (eight requests
 for four slots) can fill the next batch while the current one runs. Measure the actual
-workload: eight callers improved the short HTTP benchmark, but four were slightly
-faster in Mappity's full search. Queue overflow returns 503. Image encoding runs serially;
+workload: with bounded tail padding, eight callers were slightly faster in Mappity
+on both tested CUDA cards; an earlier engine favored four. Queue overflow returns 503. Image encoding runs serially;
 questions about a shared image prefix can then run together. `--parallel 1` retains
 the serial comparison path. macOS defaults to that path; CUDA measurements do not
 establish parallel Metal performance.
@@ -148,6 +151,43 @@ call across only the sequences it evaluated, plus their prefix restore share.
 in its responses; sum them only once per exchange. These are elapsed wall timings,
 not CUDA-event kernel timings. `NativeReadout.batch_counts` reports completed
 exchanges by caller count for occupancy diagnostics.
+Parallel mode uses up to 1024 tokens per decode call. For unequal sequence lengths,
+the worker can append at most 128 discarded tail tokens per call when the shared
+context has room. Logits are read at each real prompt end, before that padding.
+This reduces small remainder calls without changing the model inputs used for an
+answer. `padding_tokens` is an exchange total; logical `usage.input_tokens`
+excludes it. The serial path retains 512-token calls.
+
+### Prefix cache
+
+Requests with several questions can reuse the exact same state and images across
+requests. The CUDA default keeps these snapshots in VRAM through Prism's on-device
+state API. Tensor payloads stay on the GPU; small metadata and cache keys stay in
+host memory. Short prefixes can also be cached. This is exact-prefix matching,
+not a partial-prefix or radix cache. Single-question requests use the direct
+inference path and do not populate this cache.
+
+The cache has four ownership slots and a conservative byte budget. A snapshot in
+use cannot be evicted. Prism retains a slot's GPU allocation after its logical
+entry expires, so the budget counts retained allocations as well as live entries.
+When a snapshot does not fit, the worker recomputes the prompt without spilling
+state to host RAM. A larger budget permits larger snapshots, not more slots.
+Model weights, working KV/recurrent state and compute buffers are separate from
+this cache budget. Startup reserves the budget in addition to the memory floors.
+
+Use `--prefix-cache host --prefix-cache-mib 1024` to opt into host snapshots and
+CPU/GPU transfers, or `--prefix-cache off` to recompute prefixes. Host mode saves
+complete text blocks and avoids snapshots for short text prefixes. Neither mode
+is an automatic secondary tier. `/v1/version` reports the mode, limits, retained
+device reservation, host cache bytes, hits, misses, evictions and bypasses.
+
+The build applies a narrow correction to the pinned Prism runtime's quantized
+device-state views. The worker refuses VRAM mode without that runtime capability;
+`/v1/version` lists `quantized-device-state-v1` under runtime patches. The patch
+is confined to Shingi's owned runtime checkout. It does not change model weights
+or calibration.
+See the [device-cache checks](results/vram-cache/REPORT.md) for correctness,
+memory bounds, matched transfer timings and full Mappity measurements.
 
 ### Images
 
@@ -155,16 +195,11 @@ Add an `images` list to a request: up to 8 PNG, JPEG, GIF or BMP images, each
 as base64 bytes or a `data:image/...;base64,` URL, at most 20 MiB each. They
 are placed in order before the text, and every image uses at least 1,024 of
 the 16,384 context tokens. The questions of one request share one pass over
-the images and the state. The runtime saves complete prefix blocks and, in parallel
-mode, forks a restored prefix into independent question sequences. A sole shared
-prefix stays on the GPU across waves of questions, avoiding repeated host restores.
-Short text prefixes remain uncached: even a few tokens require a large recurrent-state
-snapshot, whose transfer can cost more than reevaluating those tokens. The remaining
-prefix tokens and each question still require evaluation; restore and scheduling
-costs are included in the measured latency.
-A small cache keeps the four most recent saved states in host memory (at most
-2 GiB, 1 GiB on macOS), so a later request with the same images and state also
-skips that pass. `usage`
+the images and the state. The runtime forks a saved prefix into independent question
+sequences. A sole shared prefix stays on the GPU across waves of questions.
+The prefix cache can skip image encoding in a later request with identical images
+and state. Each question still requires evaluation; snapshot, restore and scheduling
+costs are included in measured latency. `usage`
 counts the image tokens once per request. Text must not contain the
 `<__media__>` marker when images are attached.
 

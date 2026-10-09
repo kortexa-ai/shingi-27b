@@ -152,6 +152,8 @@ def main():
     parser.add_argument("--projector", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--parallel", type=int, default=4)
+    parser.add_argument("--prefix-cache", choices=("vram", "host", "off"), default="vram")
+    parser.add_argument("--prefix-cache-mib", type=int, default=1024)
     parser.add_argument("--baseline-backend", type=Path)
     parser.add_argument("--reference", type=Path, help="saved original-worker results; enforce frozen agreement gates")
     parser.add_argument("--canary", action="store_true")
@@ -180,7 +182,7 @@ def main():
     try:
         sampler.start()
         cls = NativeReadout
-        kwargs = {"parallel": args.parallel}
+        kwargs = {"parallel": args.parallel, "prefix_cache": args.prefix_cache, "prefix_cache_mib": args.prefix_cache_mib}
         if args.baseline_backend:
             spec = importlib.util.spec_from_file_location("shingi.baseline_backend", args.baseline_backend)
             module = importlib.util.module_from_spec(spec)
@@ -228,8 +230,33 @@ def main():
             report["short_cache_controls"] = {"prefix": short_prefix, "suffixes": short_suffixes, "runs": short, "full": full}
             if not args.baseline_backend:
                 from shingi.decision import softmax
-                if short[2]["cache_hit"] or short[2]["reused_tokens"] or short[2]["snapshot_bytes"]:
-                    raise RuntimeError("short prefix created an expensive recurrent snapshot")
+                if args.parallel > 1:
+                    # Read logits before discarded padding, with contradictory
+                    # peers and both bounded-padding and wide-length batches.
+                    report["padding_controls"] = []
+                    for lengths in ([0, 1, 4, 10], [0, 30, 120, 300]):
+                        prompts = [{"prompt": prefix_for({"parcel": color, "inventory": "Item recorded. " * length}) +
+                                    suffix_for("Is the parcel red?", [("yes", ""), ("no", "")]),
+                                    "labels": ["A", "B"]}
+                                   for color, length in zip(["red", "blue", "green", "red"], lengths)]
+                        references = [backend.infer(p["prompt"], p["labels"]) for p in prompts]
+                        for order in ([0, 1, 2, 3], [3, 2, 1, 0]):
+                            result = backend._call({"batch": [prompts[i] for i in order]}, 300)
+                            report["padding_controls"].append({"prompts": prompts, "order": order,
+                                                               "references": references, "result": result})
+                            if lengths[-1] == 10 and not result["responses"][0].get("padding_tokens"):
+                                raise RuntimeError("short mixed-length control did not exercise padding")
+                            for i, actual in zip(order, result["responses"]):
+                                p, q = softmax(actual["logits"]), softmax(references[i]["logits"])
+                                if sum(abs(a-b) for a, b in zip(p, q))/2 > .005 or p.index(max(p)) != q.index(max(q)):
+                                    raise RuntimeError("discarded padding changed a decision")
+                if args.prefix_cache == "vram" and args.prefix_cache_mib >= 256:
+                    if not short[2]["cache_hit"] or short[2]["reused_tokens"] != short[2]["prefix_tokens"]:
+                        raise RuntimeError("VRAM short-prefix cache did not reuse the complete prefix")
+                    if short[2]["cache"]["device_reserved_bytes"] > args.prefix_cache_mib * 1024 ** 2:
+                        raise RuntimeError("device snapshot reservation exceeded its budget")
+                elif short[2]["cache_hit"] or short[2]["reused_tokens"] or short[2]["snapshot_bytes"]:
+                    raise RuntimeError("host/off mode cached a short recurrent snapshot")
                 for group in short + report["cache_controls"]:
                     if group["fallbacks"]:
                         raise RuntimeError("short prefix unexpectedly fell back")

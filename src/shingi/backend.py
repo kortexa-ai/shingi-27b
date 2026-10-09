@@ -12,24 +12,37 @@ from .gpu import gpu_free_mib, gpu_profile
 
 CONTEXT_TOKENS = 16384
 DEFAULT_PARALLEL = 1 if platform.system() == "Darwin" else 4
+DEFAULT_PREFIX_CACHE = "host" if platform.system() == "Darwin" else "vram"
+DEFAULT_PREFIX_CACHE_MIB = 1024
 MAX_PENDING = 64
 
 
 class NativeReadout:
-    def __init__(self, executable, model, projector=None, *, parallel=DEFAULT_PARALLEL):
+    def __init__(self, executable, model, projector=None, *, parallel=DEFAULT_PARALLEL,
+                 prefix_cache=DEFAULT_PREFIX_CACHE, prefix_cache_mib=DEFAULT_PREFIX_CACHE_MIB):
         if not isinstance(parallel, int) or not 1 <= parallel <= 4:
             raise ValueError("parallel must be 1 through 4")
+        if prefix_cache not in ("vram", "host", "off"):
+            raise ValueError("prefix_cache must be vram, host or off")
+        if isinstance(prefix_cache_mib, bool) or not isinstance(prefix_cache_mib, int) or not 0 <= prefix_cache_mib <= 65536:
+            raise ValueError("prefix_cache_mib must be 0 through 65536")
+        if prefix_cache_mib == 0:
+            prefix_cache = "off"
+        if prefix_cache == "off":
+            prefix_cache_mib = 0
+        vram_mib = prefix_cache_mib if prefix_cache == "vram" else 0
         self.lock = threading.Lock()
         self.cache_state = {"entries": 0, "host_bytes": 0}
         self.pending = queue.Queue(MAX_PENDING)
         self.closed = threading.Event()
         self.worker = None
         _, preload, self.headroom = gpu_profile()
-        if gpu_free_mib() < preload:
-            raise RuntimeError(f"Shingi 27B requires at least {preload} MiB free on the GPU before loading")
+        if gpu_free_mib() < preload + vram_mib:
+            raise RuntimeError(f"Shingi 27B requires at least {preload} MiB free plus {vram_mib} MiB for the VRAM cache before loading")
         # The optional third argument is the vision projector; without it the readout is text only.
         command = [str(executable), str(model), str(CONTEXT_TOKENS)] + ([str(projector)] if projector else [])
         command += ["--parallel", str(parallel)]
+        command += ["--prefix-cache", prefix_cache, "--prefix-cache-mib", str(prefix_cache_mib)]
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
         try:
             self.info = self._read(300)
@@ -37,8 +50,8 @@ class NativeReadout:
                 raise RuntimeError("native model failed to initialize")
             if bool(projector) != bool(self.info.get("vision")):
                 raise RuntimeError("native readout vision state does not match the requested projector")
-            if gpu_free_mib() < self.headroom:
-                raise RuntimeError("insufficient GPU headroom after model load")
+            if gpu_free_mib() < self.headroom + vram_mib:
+                raise RuntimeError("insufficient GPU headroom for model and prefix cache after model load")
             # Older/fake readouts retain the one-request protocol.
             self.parallel = min(parallel, int(self.info.get("parallel_slots", 1)))
             self._batch_counts = [0] * (self.parallel + 1)
@@ -86,12 +99,18 @@ class NativeReadout:
 
     @property
     def prefix_cache(self):
-        """Limits and current host memory of the readout's cross-request prefix cache."""
+        """Cache policy, host metadata and conservative retained device allocation."""
         if not self.prefix_reuse:
             return None
         with self.lock:
-            return {"max_entries": self.info.get("prefix_cache_entries"), "max_bytes": self.info.get("prefix_cache_bytes"),
+            info = {"max_entries": self.info.get("prefix_cache_entries"), "max_bytes": self.info.get("prefix_cache_bytes"),
                     **self.cache_state}
+            if "prefix_cache_mode" in self.info:
+                info.setdefault("mode", self.info["prefix_cache_mode"])
+                info.setdefault("device_reserved_bytes", 0)
+                for counter in ("hits", "misses", "evictions", "bypasses"):
+                    info.setdefault(counter, 0)
+            return info
 
     def _serve(self):
         current = []

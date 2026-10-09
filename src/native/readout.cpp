@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <iostream>
 #include <list>
 #include <memory>
@@ -72,12 +73,6 @@ static const int IMAGE_MIN_TOKENS = 1024;  // Matches the production Bonsai serv
 // Cross-request cache of prefix snapshots, most recently used first. Entries are matched on the
 // exact prefix text and image strings, never on a hash, so a hit always means identical input.
 static const size_t PREFIX_CACHE_ENTRIES = 4;
-#ifdef __APPLE__
-// Unified memory: snapshots share RAM with the model and the 2 GiB serving headroom.
-static const size_t PREFIX_CACHE_BYTES = size_t(1) << 30;
-#else
-static const size_t PREFIX_CACHE_BYTES = size_t(2) << 30;
-#endif
 static const size_t MAX_SUFFIXES = 2048;
 
 static std::vector<llama_token> tokenize_text(const llama_vocab *vocab, const std::string &s,
@@ -190,13 +185,16 @@ static size_t image_token_count(const mtmd::input_chunks &chunks) {
     return n;
 }
 
-// The saved state of a prefix. The state is taken at the last n_batch boundary of the prompt's
-// final text run (all text without images; the text after the last image with them), so every
-// suffix continues with exactly the batches the full prompt would use: rest + suffix tokens.
-// Short text prefixes deliberately avoid the large recurrent-state snapshot overhead.
+// The saved state of a prefix. Host mode uses the last n_batch boundary of the
+// final text run to avoid transferring large recurrent states for short prefixes.
+// Device mode saves the complete prefix. Each suffix continues from rest + suffix
+// tokens; tokenization is checked against the complete prompt before reuse.
 struct Snapshot {
     std::string key;
     std::vector<uint8_t> state;  // Empty when the boundary is the start of a text-only prompt.
+    llama_state_seq_flags flags = 0;
+    int device_slot = -1;
+    size_t snapshot_bytes = 0;
     size_t prefix_tokens = 0, images = 0, image_tokens = 0;
     llama_pos n_past = 0;
     std::vector<llama_token> rest;
@@ -215,18 +213,77 @@ struct Runtime {
     int n_vocab;
     int n_batch;
     std::list<std::shared_ptr<Snapshot>> cache;
+    std::string cache_mode;
+    size_t cache_limit;
+    struct DeviceSlot {
+        std::weak_ptr<Snapshot> owner;
+        // Prism retains buffers even when our LRU drops their metadata. Charge
+        // every allocated slot until it is overwritten, not just live entries.
+        size_t reserved = 0;
+    };
+    DeviceSlot device_slots[PREFIX_CACHE_ENTRIES];
+    size_t evictions = 0, cache_hits = 0, cache_misses = 0, cache_bypasses = 0;
+
+    size_t device_reserved() const {
+        size_t n = 0;
+        for (const auto &slot : device_slots) n += slot.reserved;
+        return n;
+    }
 
     size_t cache_bytes() const {
         size_t n = 0;
         for (const auto &e : cache) n += e->state.size() + e->key.size();
         return n;
     }
-    json cache_info() const { return {{"entries", cache.size()}, {"host_bytes", cache_bytes()}}; }
+    json cache_info() const {
+        return {{"entries", cache.size()}, {"host_bytes", cache_bytes()}, {"mode", cache_mode},
+                {"device_reserved_bytes", device_reserved()}, {"hits", cache_hits},
+                {"misses", cache_misses}, {"evictions", evictions}, {"bypasses", cache_bypasses}};
+    }
+
+    int reserve_device_slot(const std::shared_ptr<Snapshot> &snapshot, size_t bytes) {
+        // Prefer unused storage, then evict least-recently-used entries. Never
+        // overwrite a snapshot still held by a prepared request or question job.
+        std::vector<int> candidates;
+        for (size_t i = 0; i < PREFIX_CACHE_ENTRIES; ++i)
+            if (device_slots[i].owner.expired()) candidates.push_back(static_cast<int>(i));
+        for (auto it = cache.rbegin(); it != cache.rend(); ++it)
+            if ((*it)->device_slot >= 0 && it->use_count() == 1) candidates.push_back((*it)->device_slot);
+        for (int id : candidates) {
+            auto &slot = device_slots[id];
+            if (device_reserved() - slot.reserved + bytes > cache_limit) continue;
+            if (auto old = slot.owner.lock()) {
+                cache.remove(old);
+                ++evictions;
+            }
+            slot.owner = snapshot;
+            // A failed save can leave the previous Prism buffer allocated.
+            // Reduce its charge only after replacement succeeds.
+            slot.reserved = std::max(slot.reserved, bytes);
+            return id;
+        }
+        ++cache_bypasses;
+        return -1;
+    }
+
+    void remember(const std::shared_ptr<Snapshot> &snapshot) {
+        if (snapshot->state.empty() || cache_mode == "off") return;
+        if (cache_mode == "host" && snapshot->state.size() + snapshot->key.size() > cache_limit) return;
+        cache.push_front(snapshot);
+        while (cache.size() > PREFIX_CACHE_ENTRIES || (cache_mode == "host" && cache_bytes() > cache_limit)) {
+            cache.pop_back();
+            ++evictions;
+        }
+    }
+
+    void load_snapshot(const Snapshot &s) {
+        if (!s.state.empty() && llama_state_seq_set_data_ext(ctx, s.state.data(), s.state.size(), 0, s.flags) != s.state.size())
+            throw std::runtime_error("restoring the prefix sequence state failed");
+    }
 
     void restore(const Snapshot &s) {
         llama_memory_clear(llama_get_memory(ctx), true);
-        if (!s.state.empty() && llama_state_seq_set_data(ctx, s.state.data(), s.state.size(), 0) != s.state.size())
-            throw std::runtime_error("restoring the prefix sequence state failed");
+        load_snapshot(s);
     }
 
     // Clear memory and evaluate a complete prompt (fallback for a suffix whose tokens differ).
@@ -251,15 +308,17 @@ struct Runtime {
     }
 
     // Evaluate the prefix up to its snapshot boundary and save the sequence state.
-    void evaluate_prefix(const std::string &prefix, const json &images, Snapshot &made, double &preprocess_ms,
+    void evaluate_prefix(const std::string &prefix, const json &images, const std::shared_ptr<Snapshot> &snapshot, double &preprocess_ms,
                          double &snapshot_ms) {
+        auto &made = *snapshot;
         llama_memory_clear(llama_get_memory(ctx), true);
         made.images = images.size();
         if (images.empty()) {
             auto tokens = tokenize_text(vocab, prefix, true, true);
             if (tokens.empty() || tokens.size() > llama_n_ctx(ctx))
                 throw std::invalid_argument("prefix exceeds context or is empty; never truncated");
-            size_t boundary = tokens.size() / n_batch * n_batch;
+            size_t boundary = cache_mode == "vram" ? tokens.size() : tokens.size() / n_batch * n_batch;
+            if (cache_mode == "off") boundary = 0;
             decode_plain(ctx, tokens.data(), boundary, n_batch);
             made.prefix_tokens = tokens.size();
             made.n_past = static_cast<llama_pos>(boundary);
@@ -282,11 +341,18 @@ struct Runtime {
             made.split_ok = n_last >= made.tail_tokens.size() &&
                 std::equal(made.tail_tokens.begin(), made.tail_tokens.end(), last + n_last - made.tail_tokens.size());
             preprocess_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            if (cache_mode == "off") {
+                // Validate/tokenize once, but do not encode an image prefix that
+                // the full-prompt fallback would immediately evaluate again.
+                made.split_ok = false;
+                made.rest = made.tail_tokens;
+                return;
+            }
             llama_pos n_past = 0;
             for (size_t i = 0; i + 1 < chunks.size(); ++i)
                 if (mtmd_helper_eval_chunk_single(vision, ctx, chunks[i], n_past, 0, n_batch, false, &n_past) != 0)
                     throw std::runtime_error("multimodal evaluation failed");
-            size_t boundary = n_last / n_batch * n_batch;
+            size_t boundary = cache_mode == "vram" ? n_last : n_last / n_batch * n_batch;
             decode_text(ctx, last, boundary, n_past, n_batch, false);
             made.n_past = n_past + static_cast<llama_pos>(boundary);
             made.rest.assign(last + boundary, last + n_last);
@@ -294,9 +360,37 @@ struct Runtime {
         if (made.n_past > 0) {
             auto start = std::chrono::steady_clock::now();
             size_t size = llama_state_seq_get_size(ctx, 0);
+            made.snapshot_bytes = size;
+            size_t reservation = 0;
+            if (cache_mode == "vram") {
+                // The host serialization size bounds tensor payload bytes. Add a
+                // conservative 4 MiB allocation/alignment allowance per slot and
+                // round to 4 MiB for this pinned runtime/checkpoint. This includes
+                // retained buffers; metadata alone is not a VRAM measurement.
+                constexpr size_t unit = 4ULL << 20;
+                reservation = ((size + unit - 1) / unit + 1) * unit;
+                made.device_slot = reserve_device_slot(snapshot, reservation);
+                if (made.device_slot >= 0) {
+                    made.flags = LLAMA_STATE_SEQ_FLAGS_ON_DEVICE;
+                    if (made.device_slot != 0) llama_memory_seq_cp(llama_get_memory(ctx), 0, made.device_slot, -1, -1);
+                    size = llama_state_seq_get_size_ext(ctx, made.device_slot, made.flags);
+                }
+            }
+            if (cache_mode == "off" || (cache_mode == "vram" && made.device_slot < 0)) {
+                // VRAM-only means no hidden spill to host RAM. Reevaluate text,
+                // or take the complete multimodal fallback if no slot fits.
+                made.n_past = 0;
+                made.snapshot_bytes = 0;
+                made.rest = made.tail_tokens;
+                if (!images.empty()) made.split_ok = false;
+                return;
+            }
             made.state.resize(size);
-            if (size == 0 || llama_state_seq_get_data(ctx, made.state.data(), size, 0) != size)
+            int seq = made.device_slot >= 0 ? made.device_slot : 0;
+            if (size == 0 || llama_state_seq_get_data_ext(ctx, made.state.data(), size, seq, made.flags) != size)
                 throw std::runtime_error("saving the prefix sequence state failed");
+            if (made.device_slot >= 0) device_slots[made.device_slot].reserved = reservation;
+            if (seq != 0) llama_memory_seq_rm(llama_get_memory(ctx), seq, -1, -1);
             snapshot_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         }
     }
@@ -335,26 +429,26 @@ struct Runtime {
             if (suffix_tokens.back().empty()) throw std::invalid_argument("a suffix must not be empty");
         }
 
-        Snapshot *snapshot = nullptr;
+        std::shared_ptr<Snapshot> snapshot;
         bool cache_hit = false;
         double prefix_ms = 0, preprocess_ms = 0, snapshot_ms = 0;
-        Snapshot made;
-        if (use_cache)
+        if (use_cache && cache_mode != "off")
             for (auto it = cache.begin(); it != cache.end(); ++it)
                 if ((*it)->key == key) {
                     cache.splice(cache.begin(), cache, it);
-                    snapshot = cache.front().get();
+                    snapshot = cache.front();
                     cache_hit = true;
                     break;
                 }
+        cache_hit ? ++cache_hits : ++cache_misses;
         bool fresh = false;  // The memory holds exactly the snapshot state.
         if (!snapshot) {
             auto start = std::chrono::steady_clock::now();
-            made.key = key;
-            evaluate_prefix(prefix, images, made, preprocess_ms, snapshot_ms);
+            snapshot = std::make_shared<Snapshot>();
+            snapshot->key = key;
+            evaluate_prefix(prefix, images, snapshot, preprocess_ms, snapshot_ms);
             prefix_ms = since(start);
-            snapshot = &made;
-            fresh = true;
+            fresh = snapshot->n_past > 0;
         }
 
         json results = json::array();
@@ -405,19 +499,16 @@ struct Runtime {
         }
 
         json response = {{"results", results}, {"prefix_tokens", snapshot->prefix_tokens},
-                         {"reused_tokens", snapshot->prefix_tokens - snapshot->rest.size()},
-                         {"prefix_ms", prefix_ms}, {"snapshot_ms", snapshot_ms}, {"snapshot_bytes", snapshot->state.size()},
+                         {"reused_tokens", snapshot->state.empty() ? 0 : snapshot->prefix_tokens - snapshot->rest.size()},
+                         {"prefix_ms", prefix_ms}, {"snapshot_ms", snapshot_ms}, {"snapshot_bytes", snapshot->snapshot_bytes},
                          {"cache_hit", cache_hit}, {"fallbacks", fallbacks}};
         if (!images.empty()) {
             response["images"] = snapshot->images;
             response["image_tokens"] = snapshot->image_tokens;
             if (!cache_hit) response["image_preprocess_ms"] = preprocess_ms;
         }
-        // Only a saved state is worth keeping; a short text-only prefix has none.
-        if (use_cache && !cache_hit && !made.state.empty() && made.state.size() + key.size() <= PREFIX_CACHE_BYTES) {
-            cache.push_front(std::make_shared<Snapshot>(std::move(made)));
-            while (cache.size() > PREFIX_CACHE_ENTRIES || cache_bytes() > PREFIX_CACHE_BYTES) cache.pop_back();
-        }
+        // Only a saved state is worth keeping; off mode and host short prefixes have none.
+        if (use_cache && !cache_hit) remember(snapshot);
         response["cache"] = cache_info();
         response["total_ms"] = since(total_start);
         return response;
@@ -490,13 +581,14 @@ struct Runtime {
                 for (const auto &image : images) add_key(image.get<std::string>());
                 bool use_cache = req.value("cache", true), hit = false;
                 std::shared_ptr<Snapshot> snapshot;
-                if (use_cache) for (auto it = cache.begin(); it != cache.end(); ++it) {
+                if (use_cache && cache_mode != "off") for (auto it = cache.begin(); it != cache.end(); ++it) {
                     if ((*it)->key != key) continue;
                     snapshot = *it;
                     cache.splice(cache.begin(), cache, it);
                     hit = true;
                     break;
                 }
+                hit ? ++cache_hits : ++cache_misses;
                 double prefix_ms = 0, preprocess_ms = 0, snapshot_ms = 0;
                 if (!snapshot) {
                     snapshot = std::make_shared<Snapshot>();
@@ -505,18 +597,15 @@ struct Runtime {
                     // Prefix preparation clears device memory before it validates
                     // token count. A rejected peer must not leave a stale residency hint.
                     prepared_resident.reset();
-                    evaluate_prefix(prefix, images, *snapshot, preprocess_ms, snapshot_ms);
-                    prepared_resident = snapshot;
+                    evaluate_prefix(prefix, images, snapshot, preprocess_ms, snapshot_ms);
+                    if (snapshot->n_past > 0) prepared_resident = snapshot;
                     prefix_ms = since(t);
-                    if (use_cache && !snapshot->state.empty() && snapshot->state.size() + key.size() <= PREFIX_CACHE_BYTES) {
-                        cache.push_front(snapshot);
-                        while (cache.size() > PREFIX_CACHE_ENTRIES || cache_bytes() > PREFIX_CACHE_BYTES) cache.pop_back();
-                    }
+                    if (use_cache) remember(snapshot);
                 }
                 auto &response = responses[r];
                 response = {{"results", json::array()}, {"prefix_tokens", snapshot->prefix_tokens},
-                    {"reused_tokens", snapshot->prefix_tokens - snapshot->rest.size()},
-                    {"prefix_ms", prefix_ms}, {"snapshot_ms", snapshot_ms}, {"snapshot_bytes", snapshot->state.size()},
+                    {"reused_tokens", snapshot->state.empty() ? 0 : snapshot->prefix_tokens - snapshot->rest.size()},
+                    {"prefix_ms", prefix_ms}, {"snapshot_ms", snapshot_ms}, {"snapshot_bytes", snapshot->snapshot_bytes},
                     {"cache_hit", hit}, {"fallbacks", 0}, {"max_sequences", 0}};
                 if (!images.empty()) response.update({{"images", snapshot->images}, {"image_tokens", snapshot->image_tokens},
                                                      {"image_preprocess_ms", preprocess_ms}});
@@ -559,7 +648,7 @@ struct Runtime {
         auto mem = llama_get_memory(ctx);
         const Snapshot *resident = prepared_resident.get();
         double decode_ms = 0;
-        size_t decode_calls = 0;
+        size_t decode_calls = 0, padding_tokens = 0;
         for (size_t begin = 0; begin < jobs.size();) {
             // Admission uses the actual shared token budget, not a full context reservation
             // per slot. A long request can use the complete context by running alone.
@@ -592,8 +681,7 @@ struct Runtime {
                 auto restore_start = std::chrono::steady_clock::now();
                 if (resident != prefix) {
                     if (!llama_memory_seq_rm(mem, 0, -1, -1)) throw std::runtime_error("prefix slot reset failed");
-                    if (!prefix->state.empty() && llama_state_seq_set_data(ctx, prefix->state.data(), prefix->state.size(), 0) != prefix->state.size())
-                        throw std::runtime_error("restoring the prefix sequence state failed");
+                    load_snapshot(*prefix);
                     llama_synchronize(ctx);
                 }
                 double restore_ms = since(restore_start);
@@ -611,15 +699,33 @@ struct Runtime {
             resident = keep;
             if (!resident) llama_memory_seq_rm(mem, 0, -1, -1);
             llama_batch batch = llama_batch_init(n_batch, 0, 1);
+            size_t wave_padding = 0;
             try {
                 while (true) {
-                    size_t active = 0, take = n_batch;
+                    size_t active = 0, take = n_batch, longest = 0;
                     for (size_t i = begin; i < end; ++i) if (jobs[i].offset < jobs[i].tokens.size()) {
                         ++active;
                         take = std::min(take, jobs[i].tokens.size() - jobs[i].offset);
+                        longest = std::max(longest, jobs[i].tokens.size() - jobs[i].offset);
                     }
                     if (!active) break;
                     take = std::min(take, static_cast<size_t>(n_batch) / active);
+                    // Recurrent batches need equal lengths. A few discarded tail
+                    // tokens cost less than another full model pass for each short
+                    // remainder. Logits stay at the real last token, before padding;
+                    // these sequence states are never saved as prefix snapshots.
+                    // Bound extra compute and include all padding in KV admission.
+                    size_t padded_take = std::min(longest, static_cast<size_t>(n_batch) / active);
+                    size_t extra = 0;
+                    for (size_t i = begin; i < end; ++i) if (jobs[i].offset < jobs[i].tokens.size()) {
+                        auto left = jobs[i].tokens.size() - jobs[i].offset;
+                        if (left < padded_take) extra += padded_take - left;
+                    }
+                    if (extra <= 128 && budget + wave_padding + extra <= llama_n_ctx(ctx)) {
+                        take = padded_take;
+                        wave_padding += extra;
+                        padding_tokens += extra;
+                    }
                     batch.n_tokens = 0;
                     std::vector<std::pair<size_t, int>> finished;
                     std::vector<size_t> evaluated;
@@ -627,15 +733,18 @@ struct Runtime {
                         auto &j = jobs[i];
                         if (j.offset == j.tokens.size()) continue;
                         evaluated.push_back(i);
+                        size_t offset = j.offset;
+                        size_t count = std::min(take, j.tokens.size() - offset);
                         for (size_t k = 0; k < take; ++k) {
                             int b = batch.n_tokens++;
-                            batch.token[b] = j.tokens[j.offset];
-                            batch.pos[b] = j.past + j.offset++;
+                            batch.token[b] = k < count ? j.tokens[offset + k] : j.tokens.back();
+                            batch.pos[b] = j.past + offset + k;
                             batch.n_seq_id[b] = 1;
                             batch.seq_id[b][0] = static_cast<llama_seq_id>(i - begin + 1);
-                            batch.logits[b] = j.offset == j.tokens.size();
+                            batch.logits[b] = k < count && offset + k + 1 == j.tokens.size();
+                            if (batch.logits[b]) finished.emplace_back(i, b);
                         }
-                        if (j.offset == j.tokens.size()) finished.emplace_back(i, batch.n_tokens - 1);
+                        j.offset += count;
                     }
                     auto t = std::chrono::steady_clock::now();
                     if (llama_decode(ctx, batch) != 0) throw std::runtime_error("parallel llama_decode failed");
@@ -675,6 +784,7 @@ struct Runtime {
             // These totals describe the whole exchange, shared by its responses.
             response["decode_ms"] = decode_ms;
             response["decode_calls"] = decode_calls;
+            response["padding_tokens"] = padding_tokens;
             response["total_ms"] = since(started);
         }
         return responses;
@@ -684,13 +794,50 @@ struct Runtime {
 
 int main(int argc, char **argv) {
     int slots = 1;
-    if (argc >= 5 && std::string(argv[argc - 2]) == "--parallel") {
-        slots = std::atoi(argv[argc - 1]);
-        argc -= 2;
+#ifdef __APPLE__
+    std::string cache_mode = "host";
+#else
+    std::string cache_mode = "vram";
+#endif
+    size_t cache_mib = 1024;
+    std::vector<char *> positional;
+    try {
+        for (int i = 1; i < argc; ++i) {
+            std::string option = argv[i];
+            if (option.rfind("--", 0) != 0) { positional.push_back(argv[i]); continue; }
+            if (++i == argc) throw std::invalid_argument("missing option value");
+            std::string value = argv[i];
+            if (option == "--prefix-cache") cache_mode = value;
+            else {
+                if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos)
+                    throw std::invalid_argument("option value must be a nonnegative integer");
+                auto n = std::stoul(value);
+                if (option == "--parallel" && n >= 1 && n <= 4) slots = n;
+                else if (option == "--prefix-cache-mib" && n <= 65536) cache_mib = n;
+                else throw std::invalid_argument("invalid option or value: " + option);
+            }
+        }
+        if (cache_mode != "vram" && cache_mode != "host" && cache_mode != "off")
+            throw std::invalid_argument("prefix cache must be vram, host or off");
+    } catch (const std::exception &e) {
+        std::cerr << e.what() << '\n';
+        return 2;
     }
-    if (slots < 1 || slots > 4) { std::cerr << "parallel must be 1 through 4\n"; return 2; }
+    if (cache_mib == 0) cache_mode = "off";
+    if (cache_mode == "off") cache_mib = 0;
+    auto capability = reinterpret_cast<int (*)()>(dlsym(RTLD_DEFAULT, "shingi_prism_device_state_quantized_v1"));
+    const bool device_state_fixed = capability && capability() == 1;
+    if (cache_mode == "vram") {
+        if (!device_state_fixed) {
+            std::cerr << "VRAM caching requires the pinned Prism quantized-state fix; run scripts/build.sh\n";
+            return 2;
+        }
+    }
+    argc = positional.size() + 1;
+    for (size_t i = 0; i < positional.size(); ++i) argv[i + 1] = positional[i];
     if (argc != 3 && argc != 4) {
-        std::cerr << "usage: readout MODEL.gguf CONTEXT_TOKENS [MMPROJ.gguf] [--parallel 1..4]\n";
+        std::cerr << "usage: readout MODEL.gguf CONTEXT_TOKENS [MMPROJ.gguf] [--parallel 1..4] "
+                     "[--prefix-cache vram|host|off] [--prefix-cache-mib 0..65536]\n";
         return 2;
     }
 #ifndef __APPLE__
@@ -723,9 +870,10 @@ int main(int argc, char **argv) {
     auto cp = llama_context_default_params();
     cp.n_ctx = context;
     cp.n_seq_max = slots > 1 ? slots + 1 : 1; // sequence 0 stages shared prefixes
+    if (cache_mode == "vram") cp.n_seq_max = std::max<uint32_t>(cp.n_seq_max, PREFIX_CACHE_ENTRIES);
     cp.kv_unified = true;
-    cp.n_batch = 512;
-    cp.n_ubatch = 512;
+    cp.n_batch = slots > 1 ? 1024 : 512;
+    cp.n_ubatch = cp.n_batch;
     cp.n_threads = 12;
     cp.n_threads_batch = 12;
     cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
@@ -758,8 +906,12 @@ int main(int argc, char **argv) {
                        {"media_marker", marker}, {"max_images", MAX_IMAGES},
                        {"image_min_tokens", IMAGE_MIN_TOKENS}, {"prefix_reuse", true},
                        {"prefix_cache_entries", PREFIX_CACHE_ENTRIES},
-                       {"prefix_cache_bytes", PREFIX_CACHE_BYTES}, {"parallel_slots", slots}}).dump() << std::endl;
-    Runtime runtime{ctx, vocab, vision.get(), marker, n_vocab, static_cast<int>(cp.n_batch), {}};
+                       {"prefix_cache_bytes", cache_mib << 20}, {"prefix_cache_mode", cache_mode},
+                       {"device_state_patch", device_state_fixed ? json("quantized-device-state-v1") : json(nullptr)},
+                       {"batch_tokens", cp.n_batch}, {"microbatch_tokens", cp.n_ubatch},
+                       {"parallel_slots", slots}}).dump() << std::endl;
+    Runtime runtime{ctx, vocab, vision.get(), marker, n_vocab, static_cast<int>(cp.n_batch), {},
+                    cache_mode, cache_mib << 20, {}};
     std::string line;
     while (std::getline(std::cin, line)) {
         try {

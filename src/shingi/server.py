@@ -8,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import uvicorn
 
-from .backend import CONTEXT_TOKENS, DEFAULT_PARALLEL, NativeReadout
+from .backend import CONTEXT_TOKENS, DEFAULT_PARALLEL, DEFAULT_PREFIX_CACHE, DEFAULT_PREFIX_CACHE_MIB, NativeReadout
 from .decision import Calibration, DecisionEngine, MODEL_ID, label_mass
 from .model import (CALIBRATION_FILE, CALIBRATION_SHA256, MODEL_FILE, MODEL_SHA256, PROJECTOR, RUNTIME,
                     fetch, fetch_projector, load_calibration, sha256, verify)
@@ -65,7 +65,8 @@ def input_answers(body, engine):
 
 
 def create_app(engine=None, *, executable=None, model=None, identity=None,
-               calibration=Calibration(), calibration_sha256=None, projector=None, parallel=DEFAULT_PARALLEL):
+               calibration=Calibration(), calibration_sha256=None, projector=None, parallel=DEFAULT_PARALLEL,
+               prefix_cache=DEFAULT_PREFIX_CACHE, prefix_cache_mib=DEFAULT_PREFIX_CACHE_MIB):
     identity = identity or {"model": MODEL_ID, "model_sha256": None, "verified": False}
 
     @asynccontextmanager
@@ -73,7 +74,8 @@ def create_app(engine=None, *, executable=None, model=None, identity=None,
         backend = None
         try:
             if engine is None:
-                backend = NativeReadout(executable, model, projector, parallel=parallel)
+                backend = NativeReadout(executable, model, projector, parallel=parallel,
+                                        prefix_cache=prefix_cache, prefix_cache_mib=prefix_cache_mib)
                 app.state.engine = DecisionEngine(backend, calibration, model_id=identity["model"])
             yield
         finally:
@@ -100,9 +102,14 @@ def create_app(engine=None, *, executable=None, model=None, identity=None,
     @app.get("/v1/version")
     def version():
         vision = app.state.engine.vision
+        runtime = dict(RUNTIME)
+        patch = getattr(app.state.engine.backend, "info", {}).get("device_state_patch")
+        if patch:
+            runtime["patches"] = [patch]
         return {**identity, "calibration": asdict(app.state.engine.calibration),
-                "calibration_sha256": calibration_sha256, "runtime": RUNTIME,
+                "calibration_sha256": calibration_sha256, "runtime": runtime,
                 "context_tokens": CONTEXT_TOKENS, "parallel_slots": getattr(app.state.engine.backend, "parallel", 1),
+                "batch_tokens": getattr(app.state.engine.backend, "info", {}).get("batch_tokens"),
                 "kv_cache": "q8_0", "choice_order": "sorted",
                 "single_pass_options": 52, "choice_limit": 255, "image_input": vision,
                 "max_images": MAX_IMAGES if vision else 0,
@@ -196,6 +203,10 @@ def main():
                         help=f"{CALIBRATION_FILE}; downloaded from Hugging Face when omitted")
     parser.add_argument("--parallel", type=int, choices=range(1, 5), default=DEFAULT_PARALLEL,
                         help="independent sequences sharing model weights and the 16K context pool (1–4)")
+    parser.add_argument("--prefix-cache", choices=("vram", "host", "off"), default=DEFAULT_PREFIX_CACHE,
+                        help="snapshot storage: VRAM-only (CUDA default), host RAM (macOS default), or off")
+    parser.add_argument("--prefix-cache-mib", type=int, default=DEFAULT_PREFIX_CACHE_MIB,
+                        help="snapshot budget in MiB, 0 disables caching (default: 1024); four cache entries")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--mmproj", type=Path,
@@ -205,6 +216,8 @@ def main():
     parser.add_argument("--skip-verify", action="store_true",
                         help="do not check the pinned SHA-256 of the model, calibration and projector")
     args = parser.parse_args()
+    if not 0 <= args.prefix_cache_mib <= 65536:
+        parser.error("--prefix-cache-mib must be 0 through 65536")
     if not args.executable.is_file():
         parser.error(f"readout executable not found: {args.executable}")
     if args.no_vision and args.mmproj:
@@ -215,7 +228,8 @@ def main():
         projector, identity["projector_verified"] = prepare_projector(args.mmproj, args.skip_verify)
     # The API has no authentication. Bind beyond localhost only behind your own access control.
     uvicorn.run(create_app(executable=args.executable, model=model, identity=identity,
-                           calibration=calibration, calibration_sha256=calibration_sha256, projector=projector, parallel=args.parallel),
+                           calibration=calibration, calibration_sha256=calibration_sha256, projector=projector, parallel=args.parallel,
+                           prefix_cache=args.prefix_cache, prefix_cache_mib=args.prefix_cache_mib),
                 host=args.host, port=args.port)
 
 
