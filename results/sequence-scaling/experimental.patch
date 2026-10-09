@@ -1,0 +1,144 @@
+diff --git a/src/native/readout.cpp b/src/native/readout.cpp
+index ddeeff0..8002af6 100644
+--- a/src/native/readout.cpp
++++ b/src/native/readout.cpp
+@@ -528,12 +528,15 @@ struct Runtime {
+     };
+ 
+     json parallel_requests(const json &requests, int slots) {
+-        if (!requests.is_array() || requests.empty() || requests.size() > 4)
+-            throw std::invalid_argument("batch must contain 1 through 4 requests");
++        if (!requests.is_array() || requests.empty() || requests.size() > static_cast<size_t>(slots))
++            throw std::invalid_argument("batch exceeds experimental sequence capacity");
+         auto since = [](auto t) {
+             return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+         };
+         const auto started = std::chrono::steady_clock::now();
++        int padding_limit = 128;
++        if (const char *value = std::getenv("SHINGI_TRIAL_PADDING_TOKENS")) padding_limit = std::stoi(value);
++        if (padding_limit < 0 || padding_limit > 8192) throw std::invalid_argument("invalid trial padding bound");
+         json responses = json::array();
+         std::vector<Job> jobs;
+         std::shared_ptr<Snapshot> prepared_resident;
+@@ -645,6 +648,8 @@ struct Runtime {
+                 responses[r] = {{"error", e.what()}, {"error_kind", "input"}};
+             }
+         }
++        double prepare_ms = since(started), memory_ms = 0, readout_ms = 0, submit_ms = 0;
++        json decode_trace = json::array();
+         auto mem = llama_get_memory(ctx);
+         const Snapshot *resident = prepared_resident.get();
+         double decode_ms = 0;
+@@ -665,6 +670,7 @@ struct Runtime {
+                 ++end;
+             }
+             if (end == begin) throw std::runtime_error("no job fits the shared context");
++            const auto memory_start = std::chrono::steady_clock::now();
+             // Retain a sole shared prefix on sequence 0 across waves of questions.
+             // Mixed prefixes and independent prompts keep the full reset path.
+             const Snapshot *keep = prefixes.size() == 1 ? *prefixes.begin() : nullptr;
+@@ -698,6 +704,7 @@ struct Runtime {
+             }
+             resident = keep;
+             if (!resident) llama_memory_seq_rm(mem, 0, -1, -1);
++            memory_ms += since(memory_start);
+             llama_batch batch = llama_batch_init(n_batch, 0, 1);
+             size_t wave_padding = 0;
+             try {
+@@ -721,7 +728,7 @@ struct Runtime {
+                         auto left = jobs[i].tokens.size() - jobs[i].offset;
+                         if (left < padded_take) extra += padded_take - left;
+                     }
+-                    if (extra <= 128 && budget + wave_padding + extra <= llama_n_ctx(ctx)) {
++                    if (extra <= static_cast<size_t>(padding_limit) && budget + wave_padding + extra <= llama_n_ctx(ctx)) {
+                         take = padded_take;
+                         wave_padding += extra;
+                         padding_tokens += extra;
+@@ -748,17 +755,21 @@ struct Runtime {
+                     }
+                     auto t = std::chrono::steady_clock::now();
+                     if (llama_decode(ctx, batch) != 0) throw std::runtime_error("parallel llama_decode failed");
++                    submit_ms += since(t);
+                     // llama_decode submits asynchronous GPU work. Stop the timer only
+                     // after it finishes; otherwise the logits read hides that time.
+                     llama_synchronize(ctx);
+                     double elapsed = since(t);
+                     decode_ms += elapsed;
+                     ++decode_calls;
++                    decode_trace.push_back({{"tokens", batch.n_tokens}, {"sequences", active}, {"ms", elapsed}});
+                     // Allocate each call once, only to the sequences it evaluated.
+                     for (size_t i : evaluated) jobs[i].decode_ms += elapsed / evaluated.size();
+                     for (const auto &[i, output] : finished) {
+                         auto &j = jobs[i];
++                        const auto readout_start = std::chrono::steady_clock::now();
+                         json result = candidates(ctx, j.ids, n_vocab, output);
++                        readout_ms += since(readout_start);
+                         result.update({{"input_tokens", j.input_tokens}, {"suffix_tokens", j.suffix_tokens},
+                             {"decoded_tokens", j.tokens.size()}, {"restore_ms", j.restore_ms}, {"prefill_ms", j.decode_ms + j.restore_ms},
+                             {"batch_sequences", end - begin}});
+@@ -777,11 +788,18 @@ struct Runtime {
+             llama_batch_free(batch);
+             begin = end;
+         }
++        const auto final_clear_start = std::chrono::steady_clock::now();
+         llama_memory_clear(mem, true);
+         llama_synchronize(ctx);
++        memory_ms += since(final_clear_start);
+         for (auto &response : responses) {
+             response["cache"] = cache_info();
+             // These totals describe the whole exchange, shared by its responses.
++            response["prepare_ms"] = prepare_ms;
++            response["memory_ms"] = memory_ms;
++            response["readout_ms"] = readout_ms;
++            response["submit_ms"] = submit_ms;
++            response["decode_trace"] = decode_trace;
+             response["decode_ms"] = decode_ms;
+             response["decode_calls"] = decode_calls;
+             response["padding_tokens"] = padding_tokens;
+@@ -812,7 +830,7 @@ int main(int argc, char **argv) {
+                 if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos)
+                     throw std::invalid_argument("option value must be a nonnegative integer");
+                 auto n = std::stoul(value);
+-                if (option == "--parallel" && n >= 1 && n <= 4) slots = n;
++                if (option == "--parallel" && n >= 1 && n <= 32) slots = n;
+                 else if (option == "--prefix-cache-mib" && n <= 65536) cache_mib = n;
+                 else throw std::invalid_argument("invalid option or value: " + option);
+             }
+@@ -836,7 +854,7 @@ int main(int argc, char **argv) {
+     argc = positional.size() + 1;
+     for (size_t i = 0; i < positional.size(); ++i) argv[i + 1] = positional[i];
+     if (argc != 3 && argc != 4) {
+-        std::cerr << "usage: readout MODEL.gguf CONTEXT_TOKENS [MMPROJ.gguf] [--parallel 1..4] "
++        std::cerr << "usage: readout MODEL.gguf CONTEXT_TOKENS [MMPROJ.gguf] [--parallel 1..32] "
+                      "[--prefix-cache vram|host|off] [--prefix-cache-mib 0..65536]\n";
+         return 2;
+     }
+@@ -873,6 +891,11 @@ int main(int argc, char **argv) {
+     if (cache_mode == "vram") cp.n_seq_max = std::max<uint32_t>(cp.n_seq_max, PREFIX_CACHE_ENTRIES);
+     cp.kv_unified = true;
+     cp.n_batch = slots > 1 ? 1024 : 512;
++    if (const char *value = std::getenv("SHINGI_TRIAL_BATCH_TOKENS")) {
++        int n = std::stoi(value);
++        if (n < 512 || n > 8192) throw std::invalid_argument("trial batch must be 512..8192");
++        cp.n_batch = n;
++    }
+     cp.n_ubatch = cp.n_batch;
+     cp.n_threads = 12;
+     cp.n_threads_batch = 12;
+@@ -916,6 +939,16 @@ int main(int argc, char **argv) {
+     while (std::getline(std::cin, line)) {
+         try {
+             auto request = json::parse(line);
++            if (request.contains("profile")) {
++                void *driver = dlopen("libcuda.so.1", RTLD_NOW);
++                if (!driver) throw std::runtime_error("CUDA driver unavailable for profiler control");
++                const char *name = request.at("profile") == "start" ? "cuProfilerStart" : "cuProfilerStop";
++                auto fn = reinterpret_cast<int (*)()>(dlsym(driver, name));
++                if (!fn || fn() != 0) throw std::runtime_error("CUDA profiler control failed");
++                dlclose(driver);
++                std::cout << json({{"profile", request.at("profile")}, {"ok", true}}).dump() << std::endl;
++                continue;
++            }
+             if (request.contains("batch")) {
+                 if (slots == 1) throw std::invalid_argument("batch transport requires parallel > 1");
+                 std::cout << json({{"responses", runtime.parallel_requests(request.at("batch"), slots)}}).dump() << std::endl;

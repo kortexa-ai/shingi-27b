@@ -141,6 +141,10 @@ Different batch shapes can slightly change floating-point scores. See the
 probability differences, latency, memory and reproducible commands. More slots do not
 guarantee a speedup for every workload. Model weights and calibration are unchanged.
 
+A separate [6000 sequence-scaling study](results/sequence-scaling/REPORT.md) tested
+4–32 independent sequences. Larger batches did not remove the GPU computation
+bottleneck; its experimental patch leaves production defaults unchanged.
+
 The CUDA serving memory guard reads NVML directly on every batch, using the selected
 GPU UUID. It retains the driver handle but never caches free-memory readings.
 Startup inventory still uses `nvidia-smi`; unified-memory GPUs retain their system
