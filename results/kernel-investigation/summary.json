@@ -1,0 +1,331 @@
+{
+  "date": "2026-10-09",
+  "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+  "power_limit_w": 450,
+  "prism_revision": "d8f26eec76da6d09bb708bcba51ef64b8cd868a3",
+  "cuda": "13.0.88",
+  "nsight_compute": "2025.3.1",
+  "fixture_sha256": "b92f000dd74889f0f8a2ac5aa8e1a184812426c1a9be3caee2fc672df9ac4550",
+  "input_tokens": 51643,
+  "trials": {
+    "base-a": {
+      "source": "31537c2c7a16db716019ab97f45061ae97acd45f",
+      "slots": 4,
+      "batch_tokens": 1024,
+      "length_order": false,
+      "wall_ms": [
+        17687.255215016194,
+        17933.27225500252
+      ],
+      "median_ms": 17810.263735009357,
+      "decode_calls": [
+        104,
+        104
+      ],
+      "agreement": null,
+      "controls_passed": 16,
+      "min_free_mib": 40559,
+      "results_sha256": "7cf0f69928a5260d56224301c28da9e936dfd3581ba4357262737a4332228d36"
+    },
+    "base-b": {
+      "source": "31537c2c7a16db716019ab97f45061ae97acd45f",
+      "slots": 4,
+      "batch_tokens": 1024,
+      "length_order": false,
+      "wall_ms": [
+        18721.538953017443,
+        18836.032002000138
+      ],
+      "median_ms": 18778.78547750879,
+      "decode_calls": [
+        104,
+        104
+      ],
+      "agreement": {
+        "mae": 0.0,
+        "max": 0.0,
+        "threshold_crossings": 0
+      },
+      "controls_passed": 16,
+      "min_free_mib": 40559,
+      "results_sha256": "83ce54a68d3e19f7e5e3c83c8d458075e553d4ff7023a629056c74b7fbf0516d"
+    },
+    "base-c": {
+      "source": "31537c2c7a16db716019ab97f45061ae97acd45f",
+      "slots": 4,
+      "batch_tokens": 1024,
+      "length_order": false,
+      "wall_ms": [
+        19238.11203998048,
+        19292.7815419971
+      ],
+      "median_ms": 19265.44679098879,
+      "decode_calls": [
+        104,
+        104
+      ],
+      "agreement": {
+        "mae": 0.0,
+        "max": 0.0,
+        "threshold_crossings": 0
+      },
+      "controls_passed": 16,
+      "min_free_mib": 40561,
+      "results_sha256": "e7ac4dda51141fe08bd5574a66e5909b434c63d08b78e8f727d6b97a81f209b1"
+    },
+    "base-d": {
+      "source": "a35dd8befbbc26efdf1d728cd39b695b3406004d",
+      "slots": 4,
+      "batch_tokens": 1024,
+      "length_order": false,
+      "wall_ms": [
+        19229.795568971895,
+        19312.381730997004
+      ],
+      "median_ms": 19271.08864998445,
+      "decode_calls": [
+        104,
+        104
+      ],
+      "agreement": {
+        "mae": 0.0,
+        "max": 0.0,
+        "threshold_crossings": 0
+      },
+      "controls_passed": 16,
+      "min_free_mib": 40561,
+      "results_sha256": "56da9a3b8d6611ea8ed412f5642f25c70e2817136c0e78dc3c4485bf3d8525e4"
+    },
+    "cublas-a": {
+      "source": "a35dd8befbbc26efdf1d728cd39b695b3406004d",
+      "slots": 4,
+      "batch_tokens": 1024,
+      "length_order": false,
+      "wall_ms": [
+        27779.110518982634,
+        28260.885558032896
+      ],
+      "median_ms": 28019.998038507765,
+      "decode_calls": [
+        104,
+        104
+      ],
+      "agreement": {
+        "mae": 0.0016424131109839533,
+        "max": 0.010346578917389215,
+        "threshold_crossings": 1
+      },
+      "controls_passed": 16,
+      "min_free_mib": 38167,
+      "results_sha256": "651245edeaf7af01deb8d8b724ab555f6835be33ab6db21b7ed7ac65bf127014"
+    },
+    "gdn4-a": {
+      "source": "31537c2c7a16db716019ab97f45061ae97acd45f",
+      "slots": 4,
+      "batch_tokens": 1024,
+      "length_order": false,
+      "wall_ms": [
+        17380.127763026394,
+        17530.712075997144
+      ],
+      "median_ms": 17455.41991951177,
+      "decode_calls": [
+        104,
+        104
+      ],
+      "agreement": {
+        "mae": 0.0,
+        "max": 0.0,
+        "threshold_crossings": 0
+      },
+      "controls_passed": 16,
+      "min_free_mib": 40559,
+      "results_sha256": "f19554668a08196f53c3a37d5e6e1d42a0b71d39233ca76f90a8e2a89273bdec"
+    },
+    "gdn4-b": {
+      "source": "a35dd8befbbc26efdf1d728cd39b695b3406004d",
+      "slots": 4,
+      "batch_tokens": 1024,
+      "length_order": false,
+      "wall_ms": [
+        18013.712437008508,
+        18126.785541011486
+      ],
+      "median_ms": 18070.248989009997,
+      "decode_calls": [
+        104,
+        104
+      ],
+      "agreement": {
+        "mae": 0.0,
+        "max": 0.0,
+        "threshold_crossings": 0
+      },
+      "controls_passed": 16,
+      "min_free_mib": 40561,
+      "results_sha256": "bb125b1035ac4928a8ed0f35b6309614df79f2df3a47106df9fd271503c38b7b"
+    },
+    "pq2-j128": {
+      "source": "31537c2c7a16db716019ab97f45061ae97acd45f",
+      "slots": 4,
+      "batch_tokens": 1024,
+      "length_order": false,
+      "wall_ms": [
+        20555.564546957612,
+        20618.76028700499
+      ],
+      "median_ms": 20587.1624169813,
+      "decode_calls": [
+        104,
+        104
+      ],
+      "agreement": {
+        "mae": 0.0023224462013297555,
+        "max": 0.011811423372202867,
+        "threshold_crossings": 1
+      },
+      "controls_passed": 16,
+      "min_free_mib": 40567,
+      "results_sha256": "082448cbe72e2841edfe3d4a6bc999a2bc8496fc29001ad1f37631b2be41885b"
+    },
+    "pq2-j32": {
+      "source": "31537c2c7a16db716019ab97f45061ae97acd45f",
+      "slots": 4,
+      "batch_tokens": 1024,
+      "length_order": false,
+      "wall_ms": [
+        24868.494919966906,
+        25262.923253991175
+      ],
+      "median_ms": 25065.70908697904,
+      "decode_calls": [
+        104,
+        104
+      ],
+      "agreement": {
+        "mae": 0.0023224462013297555,
+        "max": 0.011811423372202867,
+        "threshold_crossings": 1
+      },
+      "controls_passed": 16,
+      "min_free_mib": 40569,
+      "results_sha256": "2a44faa80ab1affc569813873c7fdad1e7f82f7e3b096eaba4420e6be4b94420"
+    },
+    "pq2-j64": {
+      "source": "31537c2c7a16db716019ab97f45061ae97acd45f",
+      "slots": 4,
+      "batch_tokens": 1024,
+      "length_order": false,
+      "wall_ms": [
+        21754.54734399682,
+        21883.49564903183
+      ],
+      "median_ms": 21819.021496514324,
+      "decode_calls": [
+        104,
+        104
+      ],
+      "agreement": {
+        "mae": 0.0023224462013297555,
+        "max": 0.011811423372202867,
+        "threshold_crossings": 1
+      },
+      "controls_passed": 16,
+      "min_free_mib": 40569,
+      "results_sha256": "0ddbea9eb36898eb464ee05492ac7b494d49ffdba701b812202b949fe2f4446e"
+    },
+    "wide-base": {
+      "source": "497dc1a2207f048f4d4abb29d3b0673168a16f6f",
+      "slots": 32,
+      "batch_tokens": 8192,
+      "length_order": true,
+      "wall_ms": [
+        18299.34422299266,
+        18389.01798002189
+      ],
+      "median_ms": 18344.181101507274,
+      "decode_calls": [
+        10,
+        10
+      ],
+      "agreement": {
+        "mae": 0.002242927309703362,
+        "max": 0.014557341565811288,
+        "threshold_crossings": 3
+      },
+      "controls_passed": 32,
+      "min_free_mib": 28921,
+      "results_sha256": "5d21d3494142afd9f6938988588bb4cb05ba21da29ba403442bb0b07eb5b7c51"
+    },
+    "wide-cublas": {
+      "source": "497dc1a2207f048f4d4abb29d3b0673168a16f6f",
+      "slots": 32,
+      "batch_tokens": 8192,
+      "length_order": true,
+      "wall_ms": [
+        20813.681991014164,
+        20866.567735967692
+      ],
+      "median_ms": 20840.124863490928,
+      "decode_calls": [
+        10,
+        10
+      ],
+      "agreement": {
+        "mae": 0.0016368806638880264,
+        "max": 0.011071229554428075,
+        "threshold_crossings": 1
+      },
+      "controls_passed": 32,
+      "min_free_mib": 26633,
+      "results_sha256": "f0392e78d9cce7662bcfdcb3f7ebf8b2a15b7bfa1691bfaf337a5984a169e38a"
+    }
+  },
+  "health": {
+    "cublas-matrix-v1": {
+      "healthy": true,
+      "new_xids": [],
+      "unchanged_service_pids": true
+    },
+    "wide-matrix-v1": {
+      "healthy": true,
+      "new_xids": [],
+      "unchanged_service_pids": true
+    },
+    "ncu-gdn4-v1": {
+      "healthy": true,
+      "new_xids": [],
+      "unchanged_service_pids": true
+    },
+    "gdn-matrix-v1": {
+      "healthy": true,
+      "new_xids": [],
+      "unchanged_service_pids": true
+    },
+    "ncu-baseline-v1": {
+      "healthy": true,
+      "new_xids": [],
+      "unchanged_service_pids": true
+    },
+    "pq2-matrix-v1": {
+      "healthy": true,
+      "new_xids": [],
+      "unchanged_service_pids": true
+    }
+  },
+  "release_validation": {
+    "source": "497dc1a2207f048f4d4abb29d3b0673168a16f6f",
+    "architectures": [
+      89,
+      120
+    ],
+    "wall_ms": [
+      16947.598255996127,
+      17183.166183996946
+    ],
+    "operating_point": "cooled after runtime build; not compared with hot controls",
+    "all_probabilities_identical": true,
+    "native_sha256": "321fb61e89defd497468adaa3c61fb4df6dc6b79769c3f5c9a516070393ba1c5",
+    "cuda_library_sha256": "57fc1cd5e8fe13c4e2109bf76d158cfc1d9bc21de9b166f362add8634edcfb89"
+  }
+}

@@ -1,0 +1,38 @@
+diff --git a/ggml/src/ggml-cuda/mmq-config-blackwell.cuh b/ggml/src/ggml-cuda/mmq-config-blackwell.cuh
+index 7ead66f..60a2f95 100644
+--- a/ggml/src/ggml-cuda/mmq-config-blackwell.cuh
++++ b/ggml/src/ggml-cuda/mmq-config-blackwell.cuh
+@@ -33,7 +33,11 @@ static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_conf
+     CASE(GGML_TYPE_NVFP4, 256, 1, 128, 112, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, false);
+     CASE(GGML_TYPE_NVFP4, 256, 1, 128, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, false);
+ 
+-    return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
++    const auto config = ggml_cuda_mmq_get_config_ampere(type, J, fallback);
++    if (type == GGML_TYPE_PQ2_0 && config.type != GGML_TYPE_COUNT) {
++        return ggml_cuda_mmq_config(type, 128, 2, 64, J, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K, false, fallback);
++    }
++    return config;
+ }
+ 
+ static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config_gb10(ggml_type type, int J, bool fallback) {
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index ceb676f..a1113a4 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -1585,7 +1585,15 @@ void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args,
+     int J_best        = 0;
+     int ntiles_J_best = INT_MAX;
+ 
+-    for (int J = 8; J <= 128 && ntiles_J_best > 1; J += 8) {
++    int max_J = 128;
++    if constexpr (type == GGML_TYPE_PQ2_0) {
++        const char * trial = getenv("SHINGI_TRIAL_MMQ_J");
++        if (trial) {
++            max_J = atoi(trial);
++            GGML_ASSERT(max_J == 32 || max_J == 64 || max_J == 128);
++        }
++    }
++    for (int J = 8; J <= max_J && ntiles_J_best > 1; J += 8) {
+         const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, J, fallback, cc);
+         if (config.type == GGML_TYPE_COUNT) {
+             continue;

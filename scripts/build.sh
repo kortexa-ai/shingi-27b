@@ -16,10 +16,10 @@ STAMP="$READOUT.stamp"
 if [ "$(uname -s)" = Darwin ]; then
     # Metal builds use their own build directory and stamp, so a CUDA build is never reused.
     BUILD="$PRISM/build-metal"
-    stamp="$PRISM_REVISION Darwin-metal mtmd quantized-device-state-v1 $(shasum -a 256 "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
+    stamp="$PRISM_REVISION Darwin-metal mtmd quantized-device-state-v1 gdn-columns-sm120-v1 $(shasum -a 256 "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
 else
     BUILD="$PRISM/build"
-    stamp="$PRISM_REVISION $ARCHITECTURES mtmd quantized-device-state-v1 $(sha256sum "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
+    stamp="$PRISM_REVISION $ARCHITECTURES mtmd quantized-device-state-v1 gdn-columns-sm120-v1 $(sha256sum "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
 fi
 if [ -x "$READOUT" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$stamp" ]; then
     python3 "$ROOT/scripts/patch-prism.py" "$PRISM" --check

@@ -66,10 +66,15 @@ def test_runtime_patch_refuses_unknown_edits_and_is_idempotent(tmp_path, monkeyp
     source = root / 'src/llama-context.cpp'
     original = '\n'.join(f'const int64_t n = {item}.size/ggml_element_size({item}.tensor);' for item in ('winfo', 'rinfo'))+'\n'
     source.write_text(original)
+    gdn = root / patcher.GDN_SOURCE
+    gdn.parent.mkdir(parents=True)
+    gdn_original = ('#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == GGML_CUDA_CC_DGX_SPARK\n'
+                    'const int cols_per_warp = cc == GGML_CUDA_CC_DGX_SPARK && S_v == 128 && !KDA ? 4 : 1;\n')
+    gdn.write_text(gdn_original)
     def git(*args):
         return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
     git('init', '--quiet')
-    git('add', 'src/llama-context.cpp')
+    git('add', 'src/llama-context.cpp', patcher.GDN_SOURCE)
     git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'fixture')
     monkeypatch.setattr(patcher, 'REVISION', git('rev-parse', 'HEAD'))
     monkeypatch.setattr(sys, 'argv', ['patch-prism', str(root)])
@@ -85,3 +90,17 @@ def test_runtime_patch_refuses_unknown_edits_and_is_idempotent(tmp_path, monkeyp
     source.write_text(original)
     with pytest.raises(SystemExit, match='patch is missing'):
         patcher.main()
+
+    # Upgrade an earlier device-state-only runtime and preserve the state correction.
+    source.write_text(patcher.patched(original))
+    gdn.write_text(gdn_original)
+    monkeypatch.setattr(sys, 'argv', ['patch-prism', str(root)])
+    patcher.main()
+    assert gdn.read_text() == patcher.patched_gdn(gdn_original)
+    assert source.read_text() == patcher.patched(original)
+    # An unrelated CUDA edit must prevent even the earlier state file from changing.
+    source.write_text(original)
+    gdn.write_text(gdn_original + 'unrelated CUDA edit\n')
+    with pytest.raises(SystemExit, match='unknown changes'):
+        patcher.main()
+    assert source.read_text() == original
