@@ -125,7 +125,9 @@ sequences run together when their combined tokens would exceed it. Oversized pro
 still return an error instead of being truncated.
 
 The Python transport admits at most 64 waiting calls and gives simultaneous callers
-a 2 ms batching window. Queue overflow returns 503. Image encoding runs serially;
+a 2 ms batching window. Clients with a sustained queue should keep about twice the
+sequence count in flight (eight requests for four slots), so new arrivals can fill
+the next batch while the current one runs. Queue overflow returns 503. Image encoding runs serially;
 questions about a shared image prefix can then run together. `--parallel 1` retains
 the serial comparison path. macOS defaults to that path; CUDA measurements do not
 establish parallel Metal performance.
@@ -135,6 +137,17 @@ Different batch shapes can slightly change floating-point scores. See the
 probability differences, latency, memory and reproducible commands. More slots do not
 guarantee a speedup for every workload. Model weights and calibration are unchanged.
 
+The CUDA serving memory guard reads NVML directly on every batch, using the selected
+GPU UUID. It retains the driver handle but never caches free-memory readings.
+Startup inventory still uses `nvidia-smi`; unified-memory GPUs retain their system
+memory check. Driver errors stop the worker. Native parallel traces measure decode
+time through CUDA synchronization. Per-question `prefill_ms` allocates each decode
+call across only the sequences it evaluated, plus their prefix restore share.
+`decode_ms` and `decode_calls` describe the whole native exchange and are repeated
+in its responses; sum them only once per exchange. These are elapsed wall timings,
+not CUDA-event kernel timings. `NativeReadout.batch_counts` reports completed
+exchanges by caller count for occupancy diagnostics.
+
 ### Images
 
 Add an `images` list to a request: up to 8 PNG, JPEG, GIF or BMP images, each
@@ -142,7 +155,10 @@ as base64 bytes or a `data:image/...;base64,` URL, at most 20 MiB each. They
 are placed in order before the text, and every image uses at least 1,024 of
 the 16,384 context tokens. The questions of one request share one pass over
 the images and the state. The runtime saves complete prefix blocks and, in parallel
-mode, forks a restored prefix into independent question sequences. The remaining
+mode, forks a restored prefix into independent question sequences. A sole shared
+prefix stays on the GPU across waves of questions, avoiding repeated host restores.
+Short text prefixes remain uncached: even a few tokens require a large recurrent-state
+snapshot, whose transfer can cost more than reevaluating those tokens. The remaining
 prefix tokens and each question still require evaluation; restore and scheduling
 costs are included in the measured latency.
 A small cache keeps the four most recent saved states in host memory (at most

@@ -98,11 +98,15 @@ def http_checks(engine, cases, *, baseline=False):
                 response = client.post("/v1/systemone", json=request)
                 response.raise_for_status()
                 return {"request": request, "result": response.json(), "wall_ms": (time.perf_counter()-started)*1000}
-            for concurrency in [1, 2, 4, 4, 2, 1, 1, 4, 2]:
+            for concurrency in [1, 4, 8, 8, 4, 1]:
+                counts = getattr(engine.backend, "batch_counts", None)
                 started = time.perf_counter()
                 with ThreadPoolExecutor(concurrency) as pool:
                     results = list(pool.map(post, work))
-                report["runs"].append({"concurrency": concurrency, "seconds": time.perf_counter()-started, "results": results})
+                elapsed = time.perf_counter()-started
+                after = getattr(engine.backend, "batch_counts", None)
+                report["runs"].append({"concurrency": concurrency, "seconds": elapsed, "results": results,
+                                       "batch_counts": [b-a for a,b in zip(counts,after)] if counts else None})
             # Interleave unrelated prefix states, an image, an oversized request and a
             # chunked choice. Admission errors must not contaminate healthy peers.
             mixed = [cases[24]["request"], cases[26]["request"], cases[27]["request"]]
@@ -215,6 +219,44 @@ def main():
             prefix = prefix_for(state)
             suffixes = [(suffix_for("Is record zero red?", [("yes", ""), ("no", "")]), ["A", "B"])] * 8
             report["cache_controls"] = [backend.infer_prefix(prefix, suffixes, cache=cache) for cache in [False, True, True, False]]
+            short_prefix = prefix_for("The parcel is red and fragile. Its destination is Berlin.")
+            short_suffixes = [(suffix_for(q, [("yes", ""), ("no", "")]), ["A", "B"]) for q in
+                              ["Is the parcel red?", "Is the parcel fragile and destined for Berlin?",
+                               "Is the destination Paris?"] * 3]
+            short = [backend.infer_prefix(short_prefix, short_suffixes, cache=cache) for cache in [False, True, True, False]]
+            full = [backend.infer(short_prefix + text, labels) for text, labels in short_suffixes]
+            report["short_cache_controls"] = {"prefix": short_prefix, "suffixes": short_suffixes, "runs": short, "full": full}
+            if not args.baseline_backend:
+                from shingi.decision import softmax
+                if short[2]["cache_hit"] or short[2]["reused_tokens"] or short[2]["snapshot_bytes"]:
+                    raise RuntimeError("short prefix created an expensive recurrent snapshot")
+                for group in short + report["cache_controls"]:
+                    if group["fallbacks"]:
+                        raise RuntimeError("short prefix unexpectedly fell back")
+                    if "decode_ms" in group:
+                        accounted = sum(r["prefill_ms"] - r["restore_ms"] for r in group["results"])
+                        if abs(accounted - group["decode_ms"]) > 1e-5 or not 0 < group["decode_ms"] <= group["total_ms"]:
+                            raise RuntimeError("synchronized decode accounting is inconsistent")
+                for group in short:
+                    for actual, expected in zip(group["results"], full):
+                        p, q = softmax(actual["logits"]), softmax(expected["logits"])
+                        if sum(abs(a-b) for a,b in zip(p,q))/2 > .05 or p.index(max(p)) != q.index(max(q)):
+                            raise RuntimeError("short prefix probability agreement failed")
+                # Force native preparation order: a valid long prefix followed by
+                # a rejected oversized prefix. Rejection clears device memory and
+                # must invalidate any hint that the earlier prefix is still resident.
+                good = {"prefix": prefix, "suffixes": [{"text": s, "labels": labels} for s, labels in suffixes], "cache": False}
+                bad = {**good, "prefix": "oversized input. " * 20000}
+                mixed = backend._call({"batch": [good, bad]}, 300) if args.parallel > 1 else None
+                if mixed is not None:
+                    report["cache_error_controls"] = mixed
+                    responses = mixed["responses"]
+                    if responses[1].get("error_kind") != "input":
+                        raise RuntimeError("oversized prefix was not isolated")
+                    for actual, expected in zip(responses[0]["results"], report["cache_controls"][-1]["results"]):
+                        p, q = softmax(actual["logits"]), softmax(expected["logits"])
+                        if sum(abs(a-b) for a,b in zip(p,q))/2 > .005:
+                            raise RuntimeError("rejected prefix contaminated its valid peer")
             save()
             if args.http:
                 report["http"] = http_checks(engine, cases, baseline=bool(args.baseline_backend))

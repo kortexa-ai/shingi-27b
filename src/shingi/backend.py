@@ -41,6 +41,7 @@ class NativeReadout:
                 raise RuntimeError("insufficient GPU headroom after model load")
             # Older/fake readouts retain the one-request protocol.
             self.parallel = min(parallel, int(self.info.get("parallel_slots", 1)))
+            self._batch_counts = [0] * (self.parallel + 1)
             self.worker = threading.Thread(target=self._serve, name="shingi-readout", daemon=True)
             self.worker.start()
         except BaseException:
@@ -68,6 +69,12 @@ class NativeReadout:
             error = ValueError if result.get("error_kind") == "input" else RuntimeError
             raise error(result["error"])
         return result
+
+    @property
+    def batch_counts(self):
+        """Completed native exchanges by caller count; useful for occupancy checks."""
+        with self.lock:
+            return list(self._batch_counts)
 
     @property
     def vision(self):
@@ -121,6 +128,8 @@ class NativeReadout:
                 results = (result.get("responses") if "error" not in result else [result] * len(current)) if batched else [result]
                 if not isinstance(results, list) or len(results) != len(current):
                     raise RuntimeError("native readout returned the wrong batch result count")
+                with self.lock:
+                    self._batch_counts[len(current)] += 1
                 for (_, future, _), value in zip(current, results):
                     try:
                         value = self._result(value)

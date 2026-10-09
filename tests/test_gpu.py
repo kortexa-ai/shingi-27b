@@ -25,7 +25,6 @@ def test_profile_uses_capacity_without_machine_whitelist(total, expected, monkey
     monkeypatch.setenv('CUDA_VISIBLE_DEVICES', UUID)
     monkeypatch.setattr(gpu.subprocess, 'check_output', lambda *a, **kw: f'{UUID}, Test GPU, {total}, 18000\n')
     assert gpu.gpu_profile() == (UUID, *expected)
-    assert gpu.gpu_free_mib() == 18000
     assert gpu.gpu_snapshot()['memory_source'] == 'nvidia-smi'
 
 
@@ -72,6 +71,7 @@ def test_unreadable_meminfo_is_a_clear_error(tmp_path):
 def test_preload_gate_refuses_before_starting_the_runtime(monkeypatch):
     monkeypatch.setenv('CUDA_VISIBLE_DEVICES', UUID)
     monkeypatch.setattr(gpu.subprocess, 'check_output', lambda *a, **kw: f'{UUID}, Test GPU, 24564, 8000\n')
+    monkeypatch.setattr('shingi.backend.gpu_free_mib', lambda: 8000)
     started = []
     monkeypatch.setattr('shingi.backend.subprocess.Popen', lambda *a, **kw: started.append(a))
     with pytest.raises(RuntimeError, match='14336 MiB free'):
@@ -165,3 +165,95 @@ def test_darwin_preload_gate_refuses_before_starting_the_runtime(darwin, monkeyp
     with pytest.raises(RuntimeError, match='12288 MiB free'):
         NativeReadout('unused', 'unused')
     assert started == []
+
+
+class NvmlFunction:
+    def __init__(self, work):
+        self.work = work
+    def __call__(self, *args):
+        return self.work(*args)
+
+
+@pytest.fixture
+def nvml(monkeypatch):
+    from types import SimpleNamespace
+    state = SimpleNamespace(free=18000, total=24564, status=0, uuid=None, loads=0, queries=0, shutdowns=0)
+    def handle(uuid, out):
+        state.uuid = uuid.decode()
+        out._obj.value = 123
+        return 0
+    def query(handle, out):
+        assert handle.value == 123
+        state.queries += 1
+        out._obj.total = state.total * 1024**2
+        out._obj.free = state.free * 1024**2
+        out._obj.used = 0
+        return state.status
+    def shutdown():
+        state.shutdowns += 1
+        return 0
+    lib = SimpleNamespace(nvmlInit_v2=NvmlFunction(lambda: 0), nvmlShutdown=NvmlFunction(shutdown),
+                          nvmlDeviceGetHandleByUUID=NvmlFunction(handle), nvmlDeviceGetMemoryInfo=NvmlFunction(query))
+    def load(name):
+        assert name == "libnvidia-ml.so.1"
+        state.loads += 1
+        return lib
+    gpu._nvml_memory.cache_clear()
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', UUID)
+    monkeypatch.setattr(gpu.ctypes, 'CDLL', load)
+    monkeypatch.setattr(gpu.atexit, 'register', lambda fn: None)
+    monkeypatch.setattr(gpu.subprocess, 'check_output', lambda *a, **kw: pytest.fail('memory guard spawned a process'))
+    yield state, lib
+    gpu._nvml_memory.cache_clear()
+
+
+def test_nvml_reuses_handle_but_reads_fresh_memory(nvml):
+    state, _ = nvml
+    assert gpu.gpu_free_mib() == 18000
+    state.free = 900
+    assert gpu.gpu_free_mib() == 900
+    assert (state.loads, state.queries, state.uuid) == (1, 2, UUID)
+
+
+def test_nvml_handle_tracks_selected_uuid(nvml, monkeypatch):
+    state, _ = nvml
+    gpu.gpu_free_mib()
+    other = 'GPU-11111111-89ab-cdef-0123-456789abcdef'
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', other)
+    gpu.gpu_free_mib()
+    assert state.uuid == other and state.loads == 2
+
+
+@pytest.mark.parametrize('status', [4, 15, 999])
+def test_nvml_driver_failures_do_not_return_stale_memory(nvml, status):
+    state, _ = nvml
+    assert gpu.gpu_free_mib() == 18000
+    state.status = status
+    with pytest.raises(RuntimeError, match='NVML error'):
+        gpu.gpu_free_mib()
+
+
+def test_nvml_not_supported_uses_fresh_system_memory(nvml, monkeypatch):
+    state, _ = nvml
+    state.status = 3
+    monkeypatch.setattr(gpu, 'system_memory_mib', lambda: (128000, 99000))
+    assert gpu.gpu_free_mib() == 99000
+    monkeypatch.setattr(gpu, 'system_memory_mib', lambda: (128000, 1000))
+    assert gpu.gpu_free_mib() == 1000
+
+
+def test_nvml_rejects_invalid_memory(nvml):
+    state, _ = nvml
+    state.free = 30000
+    with pytest.raises(RuntimeError, match='invalid memory'):
+        gpu.gpu_free_mib()
+
+
+def test_nvml_unavailable_is_a_clear_error(monkeypatch):
+    gpu._nvml_memory.cache_clear()
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', UUID)
+    def missing(*args):
+        raise OSError('missing driver library')
+    monkeypatch.setattr(gpu.ctypes, 'CDLL', missing)
+    with pytest.raises(RuntimeError, match='NVIDIA memory monitor'):
+        gpu.gpu_free_mib()

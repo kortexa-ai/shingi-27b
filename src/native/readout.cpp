@@ -193,6 +193,7 @@ static size_t image_token_count(const mtmd::input_chunks &chunks) {
 // The saved state of a prefix. The state is taken at the last n_batch boundary of the prompt's
 // final text run (all text without images; the text after the last image with them), so every
 // suffix continues with exactly the batches the full prompt would use: rest + suffix tokens.
+// Short text prefixes deliberately avoid the large recurrent-state snapshot overhead.
 struct Snapshot {
     std::string key;
     std::vector<uint8_t> state;  // Empty when the boundary is the start of a text-only prompt.
@@ -444,6 +445,7 @@ struct Runtime {
         const auto started = std::chrono::steady_clock::now();
         json responses = json::array();
         std::vector<Job> jobs;
+        std::shared_ptr<Snapshot> prepared_resident;
         // Prepare each request independently. A bad member does not discard valid peers.
         for (size_t r = 0; r < requests.size(); ++r) {
             responses.push_back(json::object());
@@ -460,6 +462,7 @@ struct Runtime {
                         // Image encoding is shared within prefix requests; a standalone image
                         // prompt uses the same mtmd path as the established serial readout.
                         auto t = std::chrono::steady_clock::now();
+                        prepared_resident.reset();
                         size_t image_tokens = 0;
                         auto n = prefill_full(prompt, images, &image_tokens);
                         auto result = candidates(ctx, ids, n_vocab);
@@ -499,7 +502,11 @@ struct Runtime {
                     snapshot = std::make_shared<Snapshot>();
                     snapshot->key = key;
                     auto t = std::chrono::steady_clock::now();
+                    // Prefix preparation clears device memory before it validates
+                    // token count. A rejected peer must not leave a stale residency hint.
+                    prepared_resident.reset();
                     evaluate_prefix(prefix, images, *snapshot, preprocess_ms, snapshot_ms);
+                    prepared_resident = snapshot;
                     prefix_ms = since(t);
                     if (use_cache && !snapshot->state.empty() && snapshot->state.size() + key.size() <= PREFIX_CACHE_BYTES) {
                         cache.push_front(snapshot);
@@ -527,6 +534,7 @@ struct Runtime {
                     size_t n = snapshot->prefix_tokens + suffix.size();
                     if (n > llama_n_ctx(ctx)) throw std::invalid_argument("prompt exceeds context; never truncated");
                     if (!split) {
+                        prepared_resident.reset();
                         response["fallbacks"] = response["fallbacks"].get<size_t>() + 1;
                         auto t = std::chrono::steady_clock::now();
                         n = prefill_full(prefix + text, images);
@@ -549,6 +557,9 @@ struct Runtime {
             }
         }
         auto mem = llama_get_memory(ctx);
+        const Snapshot *resident = prepared_resident.get();
+        double decode_ms = 0;
+        size_t decode_calls = 0;
         for (size_t begin = 0; begin < jobs.size();) {
             // Admission uses the actual shared token budget, not a full context reservation
             // per slot. A long request can use the complete context by running alone.
@@ -565,12 +576,26 @@ struct Runtime {
                 ++end;
             }
             if (end == begin) throw std::runtime_error("no job fits the shared context");
-            llama_memory_clear(mem, true);
+            // Retain a sole shared prefix on sequence 0 across waves of questions.
+            // Mixed prefixes and independent prompts keep the full reset path.
+            const Snapshot *keep = prefixes.size() == 1 ? *prefixes.begin() : nullptr;
+            if (keep && (keep->state.empty() || std::any_of(jobs.begin() + begin, jobs.begin() + end,
+                         [keep](const Job &j) { return j.prefix.get() != keep; }))) keep = nullptr;
+            if (keep && resident == keep) {
+                for (int seq = 1; seq <= slots; ++seq)
+                    if (!llama_memory_seq_rm(mem, seq, -1, -1)) throw std::runtime_error("question slot reset failed");
+            } else {
+                llama_memory_clear(mem, true);
+                resident = nullptr;
+            }
             for (const auto *prefix : prefixes) {
-                if (!llama_memory_seq_rm(mem, 0, -1, -1)) throw std::runtime_error("prefix slot reset failed");
                 auto restore_start = std::chrono::steady_clock::now();
-                if (!prefix->state.empty() && llama_state_seq_set_data(ctx, prefix->state.data(), prefix->state.size(), 0) != prefix->state.size())
-                    throw std::runtime_error("restoring the prefix sequence state failed");
+                if (resident != prefix) {
+                    if (!llama_memory_seq_rm(mem, 0, -1, -1)) throw std::runtime_error("prefix slot reset failed");
+                    if (!prefix->state.empty() && llama_state_seq_set_data(ctx, prefix->state.data(), prefix->state.size(), 0) != prefix->state.size())
+                        throw std::runtime_error("restoring the prefix sequence state failed");
+                    llama_synchronize(ctx);
+                }
                 double restore_ms = since(restore_start);
                 size_t users = 0;
                 for (size_t i = begin; i < end; ++i) users += jobs[i].prefix.get() == prefix;
@@ -583,7 +608,8 @@ struct Runtime {
                 for (size_t i = begin; i < end; ++i) if (jobs[i].prefix.get() == prefix && jobs[i].past)
                     llama_memory_seq_cp(mem, 0, static_cast<llama_seq_id>(i - begin + 1), -1, -1);
             }
-            llama_memory_seq_rm(mem, 0, -1, -1);
+            resident = keep;
+            if (!resident) llama_memory_seq_rm(mem, 0, -1, -1);
             llama_batch batch = llama_batch_init(n_batch, 0, 1);
             try {
                 while (true) {
@@ -596,9 +622,11 @@ struct Runtime {
                     take = std::min(take, static_cast<size_t>(n_batch) / active);
                     batch.n_tokens = 0;
                     std::vector<std::pair<size_t, int>> finished;
+                    std::vector<size_t> evaluated;
                     for (size_t i = begin; i < end; ++i) {
                         auto &j = jobs[i];
                         if (j.offset == j.tokens.size()) continue;
+                        evaluated.push_back(i);
                         for (size_t k = 0; k < take; ++k) {
                             int b = batch.n_tokens++;
                             batch.token[b] = j.tokens[j.offset];
@@ -611,8 +639,14 @@ struct Runtime {
                     }
                     auto t = std::chrono::steady_clock::now();
                     if (llama_decode(ctx, batch) != 0) throw std::runtime_error("parallel llama_decode failed");
+                    // llama_decode submits asynchronous GPU work. Stop the timer only
+                    // after it finishes; otherwise the logits read hides that time.
+                    llama_synchronize(ctx);
                     double elapsed = since(t);
-                    for (size_t i = begin; i < end; ++i) jobs[i].decode_ms += elapsed / (end - begin);
+                    decode_ms += elapsed;
+                    ++decode_calls;
+                    // Allocate each call once, only to the sequences it evaluated.
+                    for (size_t i : evaluated) jobs[i].decode_ms += elapsed / evaluated.size();
                     for (const auto &[i, output] : finished) {
                         auto &j = jobs[i];
                         json result = candidates(ctx, j.ids, n_vocab, output);
@@ -635,8 +669,12 @@ struct Runtime {
             begin = end;
         }
         llama_memory_clear(mem, true);
+        llama_synchronize(ctx);
         for (auto &response : responses) {
             response["cache"] = cache_info();
+            // These totals describe the whole exchange, shared by its responses.
+            response["decode_ms"] = decode_ms;
+            response["decode_calls"] = decode_calls;
             response["total_ms"] = since(started);
         }
         return responses;

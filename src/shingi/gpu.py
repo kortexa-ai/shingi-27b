@@ -1,8 +1,12 @@
 """Portable CUDA and Apple Metal memory gates. This module never manages system services."""
 import os
+import atexit
+import ctypes
+import functools
 import platform
 import re
 import subprocess
+import threading
 
 UNREPORTED = re.compile(r"\[?(N/A|Not Supported)\]?")
 VM_STAT_PAGE_SIZE = re.compile(r"page size of (\d+) bytes")
@@ -105,5 +109,65 @@ def gpu_profile():
     return gpu["uuid"], preload * 1024, headroom * 1024
 
 
+class _MemoryInfo(ctypes.Structure):
+    # nvmlMemory_t, the stable v1 ABI provided by the installed NVIDIA driver.
+    _fields_ = [(name, ctypes.c_ulonglong) for name in ("total", "free", "used")]
+
+
+class _NvmlMemory:
+    def __init__(self, uuid):
+        try:
+            self.lib = ctypes.CDLL("libnvidia-ml.so.1")
+            self.lib.nvmlInit_v2.argtypes = []
+            self.lib.nvmlShutdown.argtypes = []
+            self.lib.nvmlDeviceGetHandleByUUID.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+            self.lib.nvmlDeviceGetMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MemoryInfo)]
+            for name in ("nvmlInit_v2", "nvmlShutdown", "nvmlDeviceGetHandleByUUID", "nvmlDeviceGetMemoryInfo"):
+                getattr(self.lib, name).restype = ctypes.c_int
+        except (OSError, AttributeError) as exc:
+            raise RuntimeError("could not load the NVIDIA memory monitor") from exc
+        self._check(self.lib.nvmlInit_v2())
+        try:
+            self.handle = ctypes.c_void_p()
+            self._check(self.lib.nvmlDeviceGetHandleByUUID(uuid.encode("ascii"), ctypes.byref(self.handle)))
+        except BaseException:
+            self.lib.nvmlShutdown()
+            raise
+        atexit.register(self.lib.nvmlShutdown)
+
+    @staticmethod
+    def _check(status):
+        if status:
+            raise RuntimeError(f"could not query selected GPU memory: NVML error {status}")
+
+    def free_mib(self):
+        memory = _MemoryInfo()
+        status = self.lib.nvmlDeviceGetMemoryInfo(self.handle, ctypes.byref(memory))
+        # Unified-memory devices can report NOT_SUPPORTED or unavailable capacity.
+        # Other driver failures must stop inference, never reuse an old free value.
+        if status == 3:
+            return system_memory_mib()[1]
+        self._check(status)
+        if memory.total in (0, 2**64 - 1):
+            return system_memory_mib()[1]
+        if memory.free > memory.total or memory.used > memory.total:
+            raise RuntimeError("NVML returned invalid memory values")
+        return memory.free // (1024 * 1024)
+
+
+_memory_lock = threading.Lock()
+
+
+@functools.lru_cache(maxsize=1)
+def _nvml_memory(uuid):
+    return _NvmlMemory(uuid)
+
+
 def gpu_free_mib():
-    return gpu_snapshot()["free_mib"]
+    if is_macos():
+        return metal_snapshot()["free_mib"]
+    # Retain the library and UUID-bound handle, not the reading. Every guard sees
+    # fresh driver data without creating a process or parsing command output.
+    with _memory_lock:
+        monitor = _nvml_memory(selected_gpu())
+    return monitor.free_mib()

@@ -58,6 +58,10 @@ def test_independent_calls_are_batched_and_return_to_their_own_callers(readout):
         results = list(pool.map(call, range(4)))
     assert [r["logits"] for r in results] == [[i, -i] for i in range(4)]
     assert max(r["batch_size"] for r in results) > 1
+    counts = readout.batch_counts
+    assert sum(size * count for size, count in enumerate(counts)) == 4
+    counts[0] = 99
+    assert readout.batch_counts[0] == 0
 
 
 def test_input_error_does_not_kill_the_worker_or_other_requests(readout):
@@ -100,6 +104,17 @@ def test_timeout_stops_owned_process_and_rejects_subsequent_work(readout):
     assert readout.process.poll() is not None
     with pytest.raises(RuntimeError, match="closed"):
         readout.infer("1", ["A", "B"])
+
+
+def test_memory_guard_failure_stops_worker_before_inference(readout, monkeypatch):
+    def failed():
+        raise RuntimeError("NVML driver unavailable")
+    monkeypatch.setattr(module, "gpu_free_mib", failed)
+    with pytest.raises(RuntimeError, match="NVML driver unavailable"):
+        readout.infer("1", ["A", "B"])
+    readout.close()
+    assert readout.process.poll() is not None
+    assert sum(readout.batch_counts) == 0
 
 
 def test_close_is_idempotent_and_wakes_pending_calls(readout):
