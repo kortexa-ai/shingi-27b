@@ -7,7 +7,7 @@ active sequences. A sole shared prefix stays on the GPU across question waves;
 a freshly evaluated prefix also avoids the first host restore. Rejected preparation
 invalidates the device-residency hint before memory is cleared.
 
-Clients should keep eight requests in flight to supply four GPU sequences. The
+Eight requests in flight can supply four GPU sequences more consistently. The
 transport queue remains bounded at 64, and its admission window remains 2 ms.
 Weights, identity calibration, context size, sequence limit and runtime are unchanged.
 
@@ -34,6 +34,13 @@ only 4 of 24 requests were in full four-request exchanges in each trial. With ei
 callers, 20 of 24 and 24 of 24 were in full exchanges. The batch histogram is recorded
 by the worker, not inferred from response timing. These are small fixed-workload
 measurements, not a general throughput guarantee.
+
+Full Mappity application trials on this engine used caller counts 4, 8, 8, 4, 4, 8.
+Four callers had median search latency 28.92 s (28.90–29.05) and game latency
+4.48 s (4.46–4.49); eight took 29.41 s (29.37–29.51) and 4.59 s (4.57–4.60).
+Mappity therefore retains four callers. Full batches are not sufficient evidence of
+better application throughput. See the [application measurements](https://github.com/kortexa-ai/mappity/blob/main/experiments/README.md)
+for frozen inputs, controls and probability differences.
 
 ## Memory checks and prefix reuse
 
@@ -62,6 +69,29 @@ Short text prefixes remain uncached. A separate 19-token experiment needed a
 slower (422 ms versus 281 ms without that snapshot). Saving short prefixes therefore
 failed the performance check. The final implementation preserves complete-block
 snapshot boundaries and optimizes useful shared-prefix residency instead.
+
+### Confirmed host transfer path
+
+`Snapshot::state` is a host `std::vector<uint8_t>`. The readout calls
+`llama_state_seq_get_data` and `llama_state_seq_set_data`, which select the host
+writer/reader with flags zero in pinned Prism revision `d8f26eec`. The host writer
+calls `ggml_backend_tensor_get`; the reader calls `ggml_backend_tensor_set`.
+The CUDA implementations use `cudaMemcpyDeviceToHost` and `cudaMemcpyHostToDevice`,
+respectively, and synchronize the stream after each tensor copy. These are real
+GPU/host transfers, not just cache metadata changes. The 192,566,828-byte snapshot
+above is about 184 MiB. The measured restore time includes transfers and synchronization;
+it does not isolate DDR4 bandwidth, PCIe bandwidth or CPU overhead.
+
+Prism also exposes `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`. Its header explicitly says
+that another save for a sequence ID invalidates prior on-device snapshots for that
+ID. All current cache entries are saved from sequence 0, so changing the flag alone
+would break the four-entry cache. Device snapshot ownership and a bounded VRAM budget
+need separate validation. The deployed fix keeps a shared prefix resident within an
+exchange; the cross-request LRU still stores snapshots in host RAM.
+
+Source: pinned Prism [state I/O](https://github.com/PrismML-Eng/llama.cpp/blob/d8f26eec76da6d09bb708bcba51ef64b8cd868a3/src/llama-context.cpp#L2674),
+[device snapshot contract](https://github.com/PrismML-Eng/llama.cpp/blob/d8f26eec76da6d09bb708bcba51ef64b8cd868a3/include/llama.h#L916),
+and [CUDA copies](https://github.com/PrismML-Eng/llama.cpp/blob/d8f26eec76da6d09bb708bcba51ef64b8cd868a3/ggml/src/ggml-cuda/ggml-cuda.cu#L786).
 
 ## Reproduction
 

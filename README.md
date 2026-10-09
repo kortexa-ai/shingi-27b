@@ -125,9 +125,10 @@ sequences run together when their combined tokens would exceed it. Oversized pro
 still return an error instead of being truncated.
 
 The Python transport admits at most 64 waiting calls and gives simultaneous callers
-a 2 ms batching window. Clients with a sustained queue should keep about twice the
-sequence count in flight (eight requests for four slots), so new arrivals can fill
-the next batch while the current one runs. Queue overflow returns 503. Image encoding runs serially;
+a 2 ms batching window. Keeping twice the sequence count in flight (eight requests
+for four slots) can fill the next batch while the current one runs. Measure the actual
+workload: eight callers improved the short HTTP benchmark, but four were slightly
+faster in Mappity's full search. Queue overflow returns 503. Image encoding runs serially;
 questions about a shared image prefix can then run together. `--parallel 1` retains
 the serial comparison path. macOS defaults to that path; CUDA measurements do not
 establish parallel Metal performance.
