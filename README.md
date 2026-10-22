@@ -29,7 +29,7 @@ vision projector (about 0.6 GB), verifies their SHA-256, and starts the API on
 
 ## Requirements
 
-- Linux on x86-64 or aarch64 with an NVIDIA GPU, or macOS on Apple Silicon
+- Linux on x86-64 or aarch64 with an NVIDIA or AMD GPU, or macOS on Apple Silicon
   (see [macOS](#macos)).
 - An NVIDIA GPU with at least 20 GiB of memory. Four-sequence serving with image input
   used about 9.8 GiB in the RTX PRO 6000 checks at the full 16K context; memory depends
@@ -54,6 +54,15 @@ Macs are much slower than CUDA GPUs. On an M4 Pro (64 GB) the examples below
 (about 70 tokens) take roughly 1.2 s each and a request of about 1,100 tokens
 roughly 12.6 s. The model uses about 8–9 GB at the full 16K context.
 
+### AMD (ROCm)
+
+Set `SHINGI_GPU_VENDOR=rocm` to build the runtime with HIP instead of CUDA. You
+need ROCm 6.1 or later with `hipconfig` and `rocm-smi`, and a card with at least
+20 GiB of VRAM; the free-memory figures above are the ones measured on NVIDIA.
+Select the card with `ROCR_VISIBLE_DEVICES=<index from rocm-smi>`, because HIP
+takes an index and AMD spells UUIDs differently between its own tools. The AMD
+build is cached separately from the CUDA one, in `build-rocm`.
+
 ## Configuration
 
 | Setting | Default | Change with |
@@ -61,10 +70,13 @@ roughly 12.6 s. The model uses about 8–9 GB at the full 16K context.
 | Port | `8765` | `--port N` or `SHINGI_PORT` |
 | Host | `127.0.0.1` | `--host H` or `SHINGI_HOST` |
 | GPU (Linux) | the GPU with the most free memory | `CUDA_VISIBLE_DEVICES=GPU-<full UUID from nvidia-smi -L>` |
+| GPU backend (Linux) | `cuda` | `SHINGI_GPU_VENDOR=rocm` |
+| AMD GPU | none selected automatically | `ROCR_VISIBLE_DEVICES=<index from rocm-smi>` |
 | Model cache | the standard Hugging Face cache | `HF_HOME` (and `HF_TOKEN` if needed) |
 | Model revision | the pinned release commit | `SHINGI_REVISION` |
 | Build and checkout | `~/.cache/shingi-27b` | `SHINGI_HOME` |
 | CUDA architectures (Linux) | `86;89;120;121` | `SHINGI_CUDA_ARCHITECTURES` |
+| AMD GPU targets | `gfx1100` | `SHINGI_GPU_TARGETS` |
 | Image input | on | `--no-vision` (text only, less memory) |
 | Parallel sequences | 4 on CUDA, 1 on macOS | `--parallel 1` through `--parallel 4` |
 | Prefix cache location | `vram` on CUDA, `host` on macOS | `--prefix-cache vram`, `host` or `off` |

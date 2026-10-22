@@ -39,24 +39,41 @@ enter_checkout() {
     exec bash "$src/run.sh" "$@" </dev/null
 }
 
+VENDOR=""
+gpu_vendor() {
+    local vendor="${SHINGI_GPU_VENDOR:-cuda}"
+    case "$vendor" in
+        cuda | rocm) printf '%s\n' "$vendor" ;;
+        *) die "SHINGI_GPU_VENDOR must be cuda or rocm" ;;
+    esac
+}
+
 check_prerequisites() {
     local os arch
     os="$(uname -s)"
     arch="$(uname -m)"
     if [ "$os" = Darwin ]; then
+        VENDOR=metal
         check_macos_prerequisites "$arch"
         return
     fi
+    VENDOR="$(gpu_vendor)" || exit 1
     [ "$os" = Linux ] || die "Linux or macOS on Apple Silicon is required (found $os)"
     case "$arch" in
         x86_64 | aarch64) ;;
         *) die "x86-64 or aarch64 is required (found $arch)" ;;
     esac
-    if ! command -v nvcc >/dev/null 2>&1 && [ -x /usr/local/cuda/bin/nvcc ]; then
-        export PATH="/usr/local/cuda/bin:$PATH"
+    if [ "$VENDOR" = rocm ]; then
+        if [ -d /opt/rocm/bin ]; then export PATH="/opt/rocm/bin:$PATH"; fi
+        need hipconfig "Install ROCm 6.1 or later."
+        need rocm-smi "Install ROCm 6.1 or later; it reports the AMD GPU memory."
+    else
+        if ! command -v nvcc >/dev/null 2>&1 && [ -x /usr/local/cuda/bin/nvcc ]; then
+            export PATH="/usr/local/cuda/bin:$PATH"
+        fi
+        need nvidia-smi "Install the NVIDIA driver."
+        need nvcc "Install the CUDA toolkit (12.9 or later) and put nvcc on PATH."
     fi
-    need nvidia-smi "Install the NVIDIA driver."
-    need nvcc "Install the CUDA toolkit (12.9 or later) and put nvcc on PATH."
     need cmake "Install CMake 3.21 or later."
     need git "Install Git."
     need c++ "Install a C++17 compiler such as g++."
@@ -89,6 +106,14 @@ check_cxx17_and_uv() {
 # Respect CUDA_VISIBLE_DEVICES; otherwise pick the GPU with the most free memory.
 select_gpu() {
     local rows count best uuid free name
+    if [ "$VENDOR" = rocm ]; then
+        if [ -n "${ROCR_VISIBLE_DEVICES:-}" ]; then
+            say "using ROCR_VISIBLE_DEVICES=$ROCR_VISIBLE_DEVICES"
+            return
+        fi
+        rocm-smi --showproductname >&2 || die "rocm-smi cannot list the AMD GPUs"
+        die "set ROCR_VISIBLE_DEVICES to one index, for example: export ROCR_VISIBLE_DEVICES=0"
+    fi
     if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
         say "using CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
         return
