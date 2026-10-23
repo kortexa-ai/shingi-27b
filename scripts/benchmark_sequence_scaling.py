@@ -16,7 +16,7 @@ import threading
 import time
 
 from shingi.decision import softmax
-from shingi.gpu import gpu_free_mib, gpu_snapshot
+from shingi.gpu import gpu_free_mib, gpu_profile, gpu_snapshot
 
 
 def measure(executable, model, projector, fixture, slots, batch_tokens, rounds, out,
@@ -34,8 +34,10 @@ def measure(executable, model, projector, fixture, slots, batch_tokens, rounds, 
               'memory_samples': [], 'profiled': profile, 'items': len(items), 'length_order': length_order}
     def save():
         (out / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
-    # The wrapper also monitors the whole GPU; this is a local serving headroom check.
-    assert gpu_free_mib() >= 32 * 1024, 'preload headroom'
+    # The wrapper also monitors the whole GPU; these are the engine's own serving headroom gates
+    # (14/4 GiB on GPUs up to 32 GiB, 30/10 GiB on larger GPUs).
+    _, preload, headroom = gpu_profile()
+    assert gpu_free_mib() >= preload, 'preload headroom'
     env = dict(os.environ, SHINGI_TRIAL_BATCH_TOKENS=str(batch_tokens))
     argv = [str(executable), str(model), '16384'] + ([str(projector)] if projector else [])
     argv += ['--parallel', str(slots), '--prefix-cache', 'vram', '--prefix-cache-mib', '1024']
@@ -45,7 +47,7 @@ def measure(executable, model, projector, fixture, slots, batch_tokens, rounds, 
             try:
                 free = gpu_free_mib()
                 report['memory_samples'].append({'time': time.time(), 'free_mib': free})
-                if free < 10 * 1024:
+                if free < headroom:
                     report['headroom_abort'] = free
                     process.terminate()
                     return
@@ -84,7 +86,7 @@ def measure(executable, model, projector, fixture, slots, batch_tokens, rounds, 
             assert report['info']['ready'] and report['info']['parallel_slots'] == slots
             assert report['info']['batch_tokens'] == batch_tokens
             report['loaded'] = gpu_snapshot()
-            assert gpu_free_mib() >= 10 * 1024
+            assert gpu_free_mib() >= headroom
             monitor_thread = threading.Thread(target=monitor, daemon=True); monitor_thread.start()
             # Small canary first, followed by mixed opposite-answer states at full capacity.
             group(data['controls'][:1])
