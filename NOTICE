@@ -19,7 +19,7 @@ https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf
 
 Prism runtime / llama.cpp
 run.sh builds the public PrismML-Eng/llama.cpp fork at
-d8f26eec76da6d09bb708bcba51ef64b8cd868a3 from source.
+4fbda1292562cc1f23904d5867fb79603737547a from source.
 Its code is MIT licensed, copyright 2023-2026 The ggml authors. No runtime
 binaries are included in this repository. Preserve the runtime's LICENSE and
 third-party notices when redistributing its binaries.

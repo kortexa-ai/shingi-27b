@@ -146,9 +146,12 @@ A separate [6000 sequence-scaling study](results/sequence-scaling/REPORT.md) tes
 bottleneck; its experimental patch leaves production defaults unchanged.
 
 The [CUDA kernel investigation](results/kernel-investigation/REPORT.md) identifies
-register pressure in PQ2 and repeated input loads in Gated DeltaNet. The build
-enables Prism's four-column recurrent kernel on SM120, with identical measured
-probabilities and about a 6% gain in the warm Mappity fine pass on an RTX PRO 6000.
+register pressure in PQ2 and repeated input loads in Gated DeltaNet. The pinned
+Prism runtime derives its four-column recurrent layout for every NVIDIA Ampere or
+newer GPU, including the RTX 4090; the earlier SM120-only build patch measured
+identical probabilities and about a 6% gain in the warm Mappity fine pass on an
+RTX PRO 6000. The [cudafast kernel audit](planning/cudafast-perf.md) ranks further
+prefill candidates from the public Bonsai 2 9B CUDA leaderboard.
 
 The CUDA serving memory guard reads NVML directly on every batch, using the selected
 GPU UUID. It retains the driver handle but never caches free-memory readings.

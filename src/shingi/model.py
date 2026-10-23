@@ -14,7 +14,7 @@ MODEL_SHA256 = "c62ae5b61e458aa70aa2f51ebbd193d50e00d170cb318c60341bb68c6471242c
 CALIBRATION_FILE = "calibration.json"
 CALIBRATION_SHA256 = "bd572be4ef9a72902757f420ea2f5742e73c2627e3f372bf277baba1306f76db"
 RUNTIME = {"repository": "https://github.com/PrismML-Eng/llama.cpp",
-           "revision": "d8f26eec76da6d09bb708bcba51ef64b8cd868a3"}
+           "revision": "4fbda1292562cc1f23904d5867fb79603737547a"}
 # Bonsai 2 27B vision projector (Apache-2.0), used unchanged. One pinned source.
 PROJECTOR = {"repository": "kortexa-ai/shingi-27b",
              "revision": "262cde012ae9e57d2d37e6040e810ca8713ccc40",

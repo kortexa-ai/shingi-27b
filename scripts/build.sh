@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHINGI_HOME="${SHINGI_HOME:-$HOME/.cache/shingi-27b}"
 PRISM_URL=https://github.com/PrismML-Eng/llama.cpp.git
-PRISM_REVISION=d8f26eec76da6d09bb708bcba51ef64b8cd868a3
+PRISM_REVISION=4fbda1292562cc1f23904d5867fb79603737547a
 ARCHITECTURES="${SHINGI_CUDA_ARCHITECTURES:-86;89;120;121}"
 PRISM="$SHINGI_HOME/prism"
 READOUT="$SHINGI_HOME/bin/readout"
@@ -16,10 +16,10 @@ STAMP="$READOUT.stamp"
 if [ "$(uname -s)" = Darwin ]; then
     # Metal builds use their own build directory and stamp, so a CUDA build is never reused.
     BUILD="$PRISM/build-metal"
-    stamp="$PRISM_REVISION Darwin-metal mtmd quantized-device-state-v1 gdn-columns-sm120-v1 $(shasum -a 256 "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
+    stamp="$PRISM_REVISION Darwin-metal mtmd quantized-device-state-v1 $(shasum -a 256 "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
 else
     BUILD="$PRISM/build"
-    stamp="$PRISM_REVISION $ARCHITECTURES mtmd quantized-device-state-v1 gdn-columns-sm120-v1 $(sha256sum "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
+    stamp="$PRISM_REVISION $ARCHITECTURES mtmd quantized-device-state-v1 $(sha256sum "$ROOT/src/native/readout.cpp" | cut -d' ' -f1)"
 fi
 if [ -x "$READOUT" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$stamp" ]; then
     python3 "$ROOT/scripts/patch-prism.py" "$PRISM" --check
