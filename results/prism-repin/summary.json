@@ -1,0 +1,256 @@
+{
+ "issue": "https://github.com/kortexa-ai/shingi-27b/issues/7",
+ "host": "smarty",
+ "gpu_uuid": "GPU-a71210ca-e14a-755a-88bb-77f53a2102f6",
+ "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+ "started_utc": "2026-10-23T03:56:26Z",
+ "finished_utc": "2026-10-23T04:00:06Z",
+ "source_commit": "1464055318c308aeaa6ba6299444b87dddea1939",
+ "fixture_sha256": "b92f000dd74889f0f8a2ac5aa8e1a184812426c1a9be3caee2fc672df9ac4550",
+ "model_sha256": "c62ae5b61e458aa70aa2f51ebbd193d50e00d170cb318c60341bb68c6471242c",
+ "runtimes": {
+  "baseline": {
+   "prism_revision": "d8f26eec76da6d09bb708bcba51ef64b8cd868a3",
+   "patches": [
+    "quantized-device-state-v1",
+    "gdn-columns-sm120-v1"
+   ],
+   "libraries": "models.server/.engines/shingi/runtime-gdn-20261009/prism/build/bin (production dafeb38 build, 89;120)"
+  },
+  "candidate": {
+   "prism_revision": "4fbda1292562cc1f23904d5867fb79603737547a",
+   "patches": [
+    "quantized-device-state-v1"
+   ],
+   "libraries": "~/.cache/shingi-repin-20261022/prism/build/bin (89;120)"
+  }
+ },
+ "settings": {
+  "slots": 4,
+  "batch_tokens": 1024,
+  "context_tokens": 16384,
+  "prefix_cache": "vram 1024 MiB",
+  "rounds": 2,
+  "readout": "src/native/readout.cpp with results/sequence-scaling/experimental.patch applied in both arms"
+ },
+ "order": [
+  "baseline-1",
+  "candidate-1",
+  "baseline-2",
+  "candidate-2"
+ ],
+ "runs": {
+  "baseline-1": {
+   "prism_revision": "d8f26eec",
+   "executable_sha256": "7f24205aee0413fab004aca74e6ae53aaeff839cea28850c33afc967c36de80a",
+   "finished": true,
+   "controls_passed": "16/16",
+   "min_free_mib": 40585,
+   "loaded_free_mib": 40730,
+   "rounds": [
+    {
+     "wall_s": 16.774,
+     "decode_s": 16.22,
+     "decode_calls": 104,
+     "padding_tokens": 5893,
+     "exchange_p50_ms": 230.0,
+     "exchange_p95_ms": 257.5,
+     "input_tokens": 51643,
+     "vs_baseline_1_round_1": {
+      "mae": 0.0,
+      "max": 0.0,
+      "items_above_0_001": 0,
+      "threshold_crossings": 0
+     }
+    },
+    {
+     "wall_s": 18.191,
+     "decode_s": 17.587,
+     "decode_calls": 104,
+     "padding_tokens": 5893,
+     "exchange_p50_ms": 238.4,
+     "exchange_p95_ms": 313.3,
+     "input_tokens": 51643,
+     "vs_baseline_1_round_1": {
+      "mae": 0.0,
+      "max": 0.0,
+      "items_above_0_001": 0,
+      "threshold_crossings": 0
+     }
+    }
+   ]
+  },
+  "candidate-1": {
+   "prism_revision": "4fbda129",
+   "executable_sha256": "c48ff0212ca6ac875b38fa2a4440361bcf874cbb26c84443d93d93cbc1b72cfd",
+   "finished": true,
+   "controls_passed": "16/16",
+   "min_free_mib": 40607,
+   "loaded_free_mib": 40752,
+   "rounds": [
+    {
+     "wall_s": 17.187,
+     "decode_s": 16.633,
+     "decode_calls": 104,
+     "padding_tokens": 5893,
+     "exchange_p50_ms": 235.2,
+     "exchange_p95_ms": 264.1,
+     "input_tokens": 51643,
+     "vs_baseline_1_round_1": {
+      "mae": 0.0002937,
+      "max": 0.0029898,
+      "items_above_0_001": 11,
+      "threshold_crossings": 0
+     }
+    },
+    {
+     "wall_s": 17.32,
+     "decode_s": 16.767,
+     "decode_calls": 104,
+     "padding_tokens": 5893,
+     "exchange_p50_ms": 237.2,
+     "exchange_p95_ms": 265.4,
+     "input_tokens": 51643,
+     "vs_baseline_1_round_1": {
+      "mae": 0.0002937,
+      "max": 0.0029898,
+      "items_above_0_001": 11,
+      "threshold_crossings": 0
+     }
+    }
+   ]
+  },
+  "baseline-2": {
+   "prism_revision": "d8f26eec",
+   "executable_sha256": "7f24205aee0413fab004aca74e6ae53aaeff839cea28850c33afc967c36de80a",
+   "finished": true,
+   "controls_passed": "16/16",
+   "min_free_mib": 40585,
+   "loaded_free_mib": 40730,
+   "rounds": [
+    {
+     "wall_s": 17.67,
+     "decode_s": 17.116,
+     "decode_calls": 104,
+     "padding_tokens": 5893,
+     "exchange_p50_ms": 242.3,
+     "exchange_p95_ms": 270.2,
+     "input_tokens": 51643,
+     "vs_baseline_1_round_1": {
+      "mae": 0.0,
+      "max": 0.0,
+      "items_above_0_001": 0,
+      "threshold_crossings": 0
+     }
+    },
+    {
+     "wall_s": 17.761,
+     "decode_s": 17.21,
+     "decode_calls": 104,
+     "padding_tokens": 5893,
+     "exchange_p50_ms": 243.7,
+     "exchange_p95_ms": 271.5,
+     "input_tokens": 51643,
+     "vs_baseline_1_round_1": {
+      "mae": 0.0,
+      "max": 0.0,
+      "items_above_0_001": 0,
+      "threshold_crossings": 0
+     }
+    }
+   ]
+  },
+  "candidate-2": {
+   "prism_revision": "4fbda129",
+   "executable_sha256": "c48ff0212ca6ac875b38fa2a4440361bcf874cbb26c84443d93d93cbc1b72cfd",
+   "finished": true,
+   "controls_passed": "16/16",
+   "min_free_mib": 40607,
+   "loaded_free_mib": 40752,
+   "rounds": [
+    {
+     "wall_s": 17.725,
+     "decode_s": 17.172,
+     "decode_calls": 104,
+     "padding_tokens": 5893,
+     "exchange_p50_ms": 242.8,
+     "exchange_p95_ms": 271.5,
+     "input_tokens": 51643,
+     "vs_baseline_1_round_1": {
+      "mae": 0.0002937,
+      "max": 0.0029898,
+      "items_above_0_001": 11,
+      "threshold_crossings": 0
+     }
+    },
+    {
+     "wall_s": 17.798,
+     "decode_s": 17.248,
+     "decode_calls": 104,
+     "padding_tokens": 5893,
+     "exchange_p50_ms": 244.4,
+     "exchange_p95_ms": 272.1,
+     "input_tokens": 51643,
+     "vs_baseline_1_round_1": {
+      "mae": 0.0002937,
+      "max": 0.0029898,
+      "items_above_0_001": 11,
+      "threshold_crossings": 0
+     }
+    }
+   ]
+  }
+ },
+ "gpu_state": {
+  "before": [
+   {
+    "index": "0",
+    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "uuid": "GPU-a71210ca-e14a-755a-88bb-77f53a2102f6",
+    "memory.used [MiB]": "46258 MiB",
+    "memory.free [MiB]": "51032 MiB",
+    "temperature.gpu": "36",
+    "clocks.current.sm [MHz]": "180 MHz",
+    "power.limit [W]": "450.00 W"
+   },
+   {
+    "index": "1",
+    "name": "NVIDIA GeForce RTX 4090",
+    "uuid": "GPU-afb49bc6-cd89-6584-99cc-a0f03592a010",
+    "memory.used [MiB]": "18157 MiB",
+    "memory.free [MiB]": "4427 MiB",
+    "temperature.gpu": "63",
+    "clocks.current.sm [MHz]": "2805 MHz",
+    "power.limit [W]": "480.00 W"
+   }
+  ],
+  "after": [
+   {
+    "index": "0",
+    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "uuid": "GPU-a71210ca-e14a-755a-88bb-77f53a2102f6",
+    "memory.used [MiB]": "46258 MiB",
+    "memory.free [MiB]": "51032 MiB",
+    "temperature.gpu": "78",
+    "clocks.current.sm [MHz]": "1837 MHz",
+    "power.limit [W]": "450.00 W"
+   },
+   {
+    "index": "1",
+    "name": "NVIDIA GeForce RTX 4090",
+    "uuid": "GPU-afb49bc6-cd89-6584-99cc-a0f03592a010",
+    "memory.used [MiB]": "18157 MiB",
+    "memory.free [MiB]": "4427 MiB",
+    "temperature.gpu": "64",
+    "clocks.current.sm [MHz]": "2805 MHz",
+    "power.limit [W]": "480.00 W"
+   }
+  ]
+ },
+ "services_changed": false,
+ "notes": [
+  "Both baseline runs are bit-identical to each other.",
+  "The candidate differs from the baseline in every probability by at most 0.00299, with no 0.5 crossings; six prompts sit within 0.01 of 0.5.",
+  "Wall time differs between the two baseline runs by more than between either arm, so speed is unchanged within measurement noise."
+ ]
+}
