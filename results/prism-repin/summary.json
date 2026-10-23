@@ -252,5 +252,203 @@
   "Both baseline runs are bit-identical to each other.",
   "The candidate differs from the baseline in every probability by at most 0.00299, with no 0.5 crossings; six prompts sit within 0.01 of 0.5.",
   "Wall time differs between the two baseline runs by more than between either arm, so speed is unchanged within measurement noise."
- ]
+ ],
+ "rtx4090": {
+  "gpu_uuid": "GPU-afb49bc6-cd89-6584-99cc-a0f03592a010",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "started_utc": "2026-10-23T05:30:14Z",
+  "finished_utc": "2026-10-23T05:35:09Z",
+  "source_commit": "2d5dcff",
+  "authorization": "Franci authorized RTX 4090 production downtime for this measurement on 2026-10-22",
+  "services_stopped": [
+   "legolm/legolm.miso",
+   "models/shingi-27b",
+   "tts.server",
+   "asr/qwen"
+  ],
+  "services_restored_utc": "2026-10-23T05:41Z",
+  "free_mib": {
+   "after_stops": 22569,
+   "after_runs": 22569,
+   "baseline_used_before_and_after": 21675
+  },
+  "memory_gates_mib": {
+   "preload": 14336,
+   "headroom": 4096
+  },
+  "order": [
+   "baseline-1",
+   "candidate-1",
+   "baseline-2",
+   "candidate-2"
+  ],
+  "runs": {
+   "baseline-1": {
+    "prism_revision": "d8f26eec",
+    "executable_sha256": "7f24205aee0413fab004aca74e6ae53aaeff839cea28850c33afc967c36de80a",
+    "finished": true,
+    "controls_passed": "16/16",
+    "min_free_mib": 12326,
+    "loaded_free_mib": 12430,
+    "rounds": [
+     {
+      "wall_s": 21.392,
+      "decode_s": 20.727,
+      "decode_calls": 104,
+      "padding_tokens": 5893,
+      "exchange_p50_ms": 288.1,
+      "exchange_p95_ms": 321.8,
+      "input_tokens": 51643,
+      "vs_baseline_1_round_1": {
+       "mae": 0.0,
+       "max": 0.0,
+       "items_above_0_001": 0,
+       "threshold_crossings": 0
+      }
+     },
+     {
+      "wall_s": 21.382,
+      "decode_s": 20.717,
+      "decode_calls": 104,
+      "padding_tokens": 5893,
+      "exchange_p50_ms": 287.9,
+      "exchange_p95_ms": 321.3,
+      "input_tokens": 51643,
+      "vs_baseline_1_round_1": {
+       "mae": 0.0,
+       "max": 0.0,
+       "items_above_0_001": 0,
+       "threshold_crossings": 0
+      }
+     }
+    ]
+   },
+   "candidate-1": {
+    "prism_revision": "4fbda129",
+    "executable_sha256": "c48ff0212ca6ac875b38fa2a4440361bcf874cbb26c84443d93d93cbc1b72cfd",
+    "finished": true,
+    "controls_passed": "16/16",
+    "min_free_mib": 12348,
+    "loaded_free_mib": 12452,
+    "rounds": [
+     {
+      "wall_s": 20.287,
+      "decode_s": 19.622,
+      "decode_calls": 104,
+      "padding_tokens": 5893,
+      "exchange_p50_ms": 274.7,
+      "exchange_p95_ms": 306.9,
+      "input_tokens": 51643,
+      "vs_baseline_1_round_1": {
+       "mae": 0.000316,
+       "max": 0.00269,
+       "items_above_0_001": 5,
+       "threshold_crossings": 0
+      }
+     },
+     {
+      "wall_s": 20.279,
+      "decode_s": 19.616,
+      "decode_calls": 104,
+      "padding_tokens": 5893,
+      "exchange_p50_ms": 274.1,
+      "exchange_p95_ms": 306.1,
+      "input_tokens": 51643,
+      "vs_baseline_1_round_1": {
+       "mae": 0.000316,
+       "max": 0.00269,
+       "items_above_0_001": 5,
+       "threshold_crossings": 0
+      }
+     }
+    ]
+   },
+   "baseline-2": {
+    "prism_revision": "d8f26eec",
+    "executable_sha256": "7f24205aee0413fab004aca74e6ae53aaeff839cea28850c33afc967c36de80a",
+    "finished": true,
+    "controls_passed": "16/16",
+    "min_free_mib": 12326,
+    "loaded_free_mib": 12430,
+    "rounds": [
+     {
+      "wall_s": 21.377,
+      "decode_s": 20.718,
+      "decode_calls": 104,
+      "padding_tokens": 5893,
+      "exchange_p50_ms": 287.7,
+      "exchange_p95_ms": 322.0,
+      "input_tokens": 51643,
+      "vs_baseline_1_round_1": {
+       "mae": 0.0,
+       "max": 0.0,
+       "items_above_0_001": 0,
+       "threshold_crossings": 0
+      }
+     },
+     {
+      "wall_s": 21.394,
+      "decode_s": 20.726,
+      "decode_calls": 104,
+      "padding_tokens": 5893,
+      "exchange_p50_ms": 288.3,
+      "exchange_p95_ms": 322.4,
+      "input_tokens": 51643,
+      "vs_baseline_1_round_1": {
+       "mae": 0.0,
+       "max": 0.0,
+       "items_above_0_001": 0,
+       "threshold_crossings": 0
+      }
+     }
+    ]
+   },
+   "candidate-2": {
+    "prism_revision": "4fbda129",
+    "executable_sha256": "c48ff0212ca6ac875b38fa2a4440361bcf874cbb26c84443d93d93cbc1b72cfd",
+    "finished": true,
+    "controls_passed": "16/16",
+    "min_free_mib": 12348,
+    "loaded_free_mib": 12452,
+    "rounds": [
+     {
+      "wall_s": 20.29,
+      "decode_s": 19.627,
+      "decode_calls": 104,
+      "padding_tokens": 5893,
+      "exchange_p50_ms": 274.1,
+      "exchange_p95_ms": 306.8,
+      "input_tokens": 51643,
+      "vs_baseline_1_round_1": {
+       "mae": 0.000316,
+       "max": 0.00269,
+       "items_above_0_001": 5,
+       "threshold_crossings": 0
+      }
+     },
+     {
+      "wall_s": 20.309,
+      "decode_s": 19.639,
+      "decode_calls": 104,
+      "padding_tokens": 5893,
+      "exchange_p50_ms": 274.4,
+      "exchange_p95_ms": 307.3,
+      "input_tokens": 51643,
+      "vs_baseline_1_round_1": {
+       "mae": 0.000316,
+       "max": 0.00269,
+       "items_above_0_001": 5,
+       "threshold_crossings": 0
+      }
+     }
+    ]
+   }
+  },
+  "notes": [
+   "Both baseline runs are bit-identical to each other.",
+   "The candidate is 5.1 % faster on wall time (21.39 s to 20.29 s per round) and 5.3 % on decode time; run-to-run noise is below 0.1 %.",
+   "The candidate differs from the baseline in every probability by at most 0.00269, with no 0.5 crossings.",
+   "The parallel restore left models/shingi-27b below its 11,536 MiB preload gate (11,044 MiB free); it was restarted by hand in boot order and all four services answered 200 at 05:41 UTC."
+  ]
+ }
 }
